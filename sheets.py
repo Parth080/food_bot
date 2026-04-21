@@ -3,6 +3,7 @@ import binascii
 import json
 import logging
 import os
+import urllib.parse
 from datetime import datetime
 from google.oauth2 import service_account
 from googleapiclient.discovery import build
@@ -29,11 +30,83 @@ SUMMARY_HEADERS = [
 ]
 
 
+def _normalize_private_key(pem: str) -> str:
+    """Render/.env often store PEM as one line with literal \\n sequences."""
+    pem = (pem or "").strip()
+    if "\\n" in pem:
+        pem = pem.replace("\\n", "\n")
+    return pem
+
+
+def _credentials_from_sa_env_vars() -> dict | None:
+    """
+    Build service-account dict from flat GOOGLE_SA_* env vars (easy copy-paste into Render).
+
+    Required:
+      GOOGLE_SA_PROJECT_ID, GOOGLE_SA_PRIVATE_KEY_ID, GOOGLE_SA_PRIVATE_KEY,
+      GOOGLE_SA_CLIENT_EMAIL, GOOGLE_SA_CLIENT_ID
+
+    Optional (defaults match Google’s JSON key file):
+      GOOGLE_SA_TYPE (default service_account)
+      GOOGLE_SA_AUTH_URI, GOOGLE_SA_TOKEN_URI,
+      GOOGLE_SA_AUTH_PROVIDER_X509_CERT_URL, GOOGLE_SA_CLIENT_X509_CERT_URL,
+      GOOGLE_SA_UNIVERSE_DOMAIN
+    """
+    project_id = (os.environ.get("GOOGLE_SA_PROJECT_ID") or "").strip()
+    private_key_id = (os.environ.get("GOOGLE_SA_PRIVATE_KEY_ID") or "").strip()
+    private_key = _normalize_private_key(os.environ.get("GOOGLE_SA_PRIVATE_KEY") or "")
+    client_email = (os.environ.get("GOOGLE_SA_CLIENT_EMAIL") or "").strip()
+    client_id = (os.environ.get("GOOGLE_SA_CLIENT_ID") or "").strip()
+
+    if not all([project_id, private_key_id, private_key, client_email, client_id]):
+        return None
+
+    auth_uri = (
+        os.environ.get("GOOGLE_SA_AUTH_URI") or "https://accounts.google.com/o/oauth2/auth"
+    ).strip()
+    token_uri = (
+        os.environ.get("GOOGLE_SA_TOKEN_URI") or "https://oauth2.googleapis.com/token"
+    ).strip()
+    auth_provider = (
+        os.environ.get("GOOGLE_SA_AUTH_PROVIDER_X509_CERT_URL")
+        or "https://www.googleapis.com/oauth2/v1/certs"
+    ).strip()
+    client_x509 = (os.environ.get("GOOGLE_SA_CLIENT_X509_CERT_URL") or "").strip()
+    if not client_x509:
+        enc = urllib.parse.quote(client_email, safe="")
+        client_x509 = (
+            f"https://www.googleapis.com/robot/v1/metadata/x509/{enc}"
+        )
+    sa_type = (os.environ.get("GOOGLE_SA_TYPE") or "service_account").strip()
+    universe = (os.environ.get("GOOGLE_SA_UNIVERSE_DOMAIN") or "googleapis.com").strip()
+
+    return {
+        "type": sa_type,
+        "project_id": project_id,
+        "private_key_id": private_key_id,
+        "private_key": private_key,
+        "client_email": client_email,
+        "client_id": client_id,
+        "auth_uri": auth_uri,
+        "token_uri": token_uri,
+        "auth_provider_x509_cert_url": auth_provider,
+        "client_x509_cert_url": client_x509,
+        "universe_domain": universe,
+    }
+
+
 def _load_service_account_info() -> dict:
     """
-    Prefer GOOGLE_CREDENTIALS_B64: base64 of the service-account JSON file (one line, Render-friendly).
-    Fallback: GOOGLE_CREDENTIALS_JSON for local .env with raw JSON.
+    Credentials source (first match wins):
+
+    1. GOOGLE_SA_* flat variables (best for Render “paste env” workflows)
+    2. GOOGLE_CREDENTIALS_B64 — base64 of the full JSON key file
+    3. GOOGLE_CREDENTIALS_JSON — raw JSON string (local .env)
     """
+    assembled = _credentials_from_sa_env_vars()
+    if assembled is not None:
+        return assembled
+
     b64 = "".join((os.environ.get("GOOGLE_CREDENTIALS_B64") or "").split())
     raw = (os.environ.get("GOOGLE_CREDENTIALS_JSON") or "").strip()
 
@@ -50,7 +123,9 @@ def _load_service_account_info() -> dict:
         return json.loads(raw)
 
     raise ValueError(
-        "Set GOOGLE_CREDENTIALS_B64 (recommended) or GOOGLE_CREDENTIALS_JSON (local)"
+        "Set GOOGLE_SA_PROJECT_ID, GOOGLE_SA_PRIVATE_KEY_ID, GOOGLE_SA_PRIVATE_KEY, "
+        "GOOGLE_SA_CLIENT_EMAIL, GOOGLE_SA_CLIENT_ID — or GOOGLE_CREDENTIALS_B64 / "
+        "GOOGLE_CREDENTIALS_JSON"
     )
 
 

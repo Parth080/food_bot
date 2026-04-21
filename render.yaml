@@ -13,5 +13,13 @@ services:
         sync: false
       - key: GOOGLE_SHEET_ID
         sync: false
-      - key: GOOGLE_CREDENTIALS_B64
+      - key: GOOGLE_SA_PROJECT_ID
+        sync: false
+      - key: GOOGLE_SA_PRIVATE_KEY_ID
+        sync: false
+      - key: GOOGLE_SA_PRIVATE_KEY
+        sync: false
+      - key: GOOGLE_SA_CLIENT_EMAIL
+        sync: false
+      - key: GOOGLE_SA_CLIENT_ID
         sync: false

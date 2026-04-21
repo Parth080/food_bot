@@ -1,0 +1,17 @@
+services:
+  - type: web
+    name: janta-poll-bot
+    runtime: python
+    buildCommand: pip install -r requirements.txt
+    startCommand: gunicorn app:flask_app --workers 2 --timeout 90 --bind 0.0.0.0:$PORT
+    envVars:
+      - key: SLACK_BOT_TOKEN
+        sync: false
+      - key: SLACK_SIGNING_SECRET
+        sync: false
+      - key: SLACK_CHANNEL_ID
+        sync: false
+      - key: GOOGLE_SHEET_ID
+        sync: false
+      - key: GOOGLE_CREDENTIALS_JSON
+        sync: false

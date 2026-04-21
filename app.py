@@ -1,5 +1,8 @@
-import os
+import json
 import logging
+import os
+import urllib.error
+import urllib.request
 from datetime import date
 
 from dotenv import load_dotenv
@@ -25,13 +28,44 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
+# If set, poll is posted here; if empty, posts in the channel where /startpoll was run.
+CONFIGURED_POLL_CHANNEL_ID = (os.environ.get("SLACK_CHANNEL_ID") or "").strip()
+
+
+def _slash_notify_ephemeral(body: dict, client, user_id: str, text: str) -> None:
+    """Prefer in-channel ephemeral; slash commands always have response_url as fallback."""
+    ru = body.get("response_url")
+    try:
+        client.chat_postEphemeral(
+            channel=body["channel_id"],
+            user=user_id,
+            text=text,
+        )
+        return
+    except Exception as e:
+        logger.warning(f"chat_postEphemeral failed, using response_url: {e}")
+    if not ru:
+        return
+    try:
+        payload = json.dumps(
+            {"response_type": "ephemeral", "text": text}
+        ).encode("utf-8")
+        req = urllib.request.Request(
+            ru,
+            data=payload,
+            headers={"Content-Type": "application/json"},
+            method="POST",
+        )
+        urllib.request.urlopen(req, timeout=10)
+    except urllib.error.URLError as e:
+        logger.error(f"response_url ephemeral failed: {e}")
+
+
 # ── Slack Bolt App ────────────────────────────────────────────────────────────
 bolt_app = App(
     token=os.environ["SLACK_BOT_TOKEN"],
     signing_secret=os.environ["SLACK_SIGNING_SECRET"],
 )
-
-CHANNEL_ID = os.environ["SLACK_CHANNEL_ID"]
 
 
 # ── Slash Command: /startpoll ─────────────────────────────────────────────────
@@ -39,33 +73,43 @@ CHANNEL_ID = os.environ["SLACK_CHANNEL_ID"]
 def handle_startpoll(ack, body, client):
     """
     Admin runs /startpoll in any channel.
-    Bot posts the poll into the configured #janta channel.
+    Poll goes to SLACK_CHANNEL_ID when set; otherwise to the invoking channel.
     """
     ack()
 
     poll_date = str(date.today())
     user_id = body["user_id"]
+    post_channel = CONFIGURED_POLL_CHANNEL_ID or body["channel_id"]
 
     try:
         client.chat_postMessage(
-            channel=CHANNEL_ID,
+            channel=post_channel,
             blocks=build_poll_blocks(poll_date),
             text=f"🍽️ Food poll for {poll_date} — How was the food today?",
         )
-        logger.info(f"Poll posted by {user_id} for {poll_date}")
+        logger.info(f"Poll posted by {user_id} for {poll_date} → {post_channel}")
 
-        # Confirm to the admin privately
-        client.chat_postEphemeral(
-            channel=body["channel_id"],
-            user=user_id,
-            text=f"✅ Poll posted to <#{CHANNEL_ID}> for *{poll_date}*!",
+        _slash_notify_ephemeral(
+            body,
+            client,
+            user_id,
+            text=f"✅ Poll posted to <#{post_channel}> for *{poll_date}*!",
         )
     except Exception as e:
         logger.error(f"Failed to post poll: {e}")
-        client.chat_postEphemeral(
-            channel=body["channel_id"],
-            user=user_id,
-            text=f"❌ Failed to post poll: {str(e)}",
+        hint = ""
+        err = str(e)
+        if "channel_not_found" in err:
+            hint = (
+                "\n\n`channel_not_found`: set *SLACK_CHANNEL_ID* to a real channel ID "
+                "(e.g. `C0ABC…`), invite the bot to that channel (`/invite @Bot`), "
+                "or *clear* SLACK_CHANNEL_ID to post in the channel where you run `/startpoll`."
+            )
+        _slash_notify_ephemeral(
+            body,
+            client,
+            user_id,
+            text=f"❌ Failed to post poll: {err}{hint}",
         )
 
 

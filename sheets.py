@@ -1,6 +1,8 @@
-import os
+import base64
+import binascii
 import json
 import logging
+import os
 from datetime import datetime
 from google.oauth2 import service_account
 from googleapiclient.discovery import build
@@ -27,16 +29,34 @@ SUMMARY_HEADERS = [
 ]
 
 
-def _get_service():
+def _load_service_account_info() -> dict:
     """
-    Builds the Google Sheets API service using service account credentials.
-    Credentials are stored as a JSON string in the env var GOOGLE_CREDENTIALS_JSON.
+    Prefer GOOGLE_CREDENTIALS_B64: base64 of the service-account JSON file (one line, Render-friendly).
+    Fallback: GOOGLE_CREDENTIALS_JSON for local .env with raw JSON.
     """
-    creds_json = os.environ.get("GOOGLE_CREDENTIALS_JSON")
-    if not creds_json:
-        raise ValueError("GOOGLE_CREDENTIALS_JSON env var not set")
+    b64 = "".join((os.environ.get("GOOGLE_CREDENTIALS_B64") or "").split())
+    raw = (os.environ.get("GOOGLE_CREDENTIALS_JSON") or "").strip()
 
-    creds_dict = json.loads(creds_json)
+    if b64:
+        try:
+            decoded = base64.b64decode(b64, validate=True)
+        except (binascii.Error, ValueError) as e:
+            raise ValueError(
+                "GOOGLE_CREDENTIALS_B64 must be standard base64 of the JSON key file"
+            ) from e
+        return json.loads(decoded.decode("utf-8"))
+
+    if raw:
+        return json.loads(raw)
+
+    raise ValueError(
+        "Set GOOGLE_CREDENTIALS_B64 (recommended) or GOOGLE_CREDENTIALS_JSON (local)"
+    )
+
+
+def _get_service():
+    """Builds the Google Sheets API service using service account credentials from env."""
+    creds_dict = _load_service_account_info()
     creds = service_account.Credentials.from_service_account_info(
         creds_dict, scopes=SCOPES
     )

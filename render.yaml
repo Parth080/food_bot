@@ -13,5 +13,5 @@ services:
         sync: false
       - key: GOOGLE_SHEET_ID
         sync: false
-      - key: GOOGLE_CREDENTIALS_JSON
+      - key: GOOGLE_CREDENTIALS_B64
         sync: false

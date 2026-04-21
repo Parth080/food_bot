@@ -109,6 +109,12 @@ def slack_commands():
     return handler.handle(request)
 
 
+@flask_app.route("/", methods=["POST"])
+def slack_root_post():
+    """Slack Request URL often set to https://<host>/ — same Bolt handler as /slack/events."""
+    return handler.handle(request)
+
+
 @flask_app.route("/health", methods=["GET"])
 def health():
     return jsonify({"status": "ok", "service": "janta-poll-bot"}), 200

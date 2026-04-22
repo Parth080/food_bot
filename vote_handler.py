@@ -1,7 +1,7 @@
 import json
 import logging
 import os
-from datetime import date
+from datetime import date, datetime
 
 from poll import build_poll_blocks
 from sheets import (
@@ -213,11 +213,15 @@ def process_vote(
 def _refresh_poll_message(client, channel_id: str, message_ts: str, poll_date: str, counts: dict):
     """Updates the original poll message with the latest vote counts."""
     try:
+        updated_at = datetime.now().strftime("%H:%M:%S")
         client.chat_update(
             channel=channel_id,
             ts=message_ts,
-            blocks=build_poll_blocks(poll_date, counts),
-            text=f"Food poll — {poll_date}",
+            blocks=build_poll_blocks(poll_date, counts, updated_at=updated_at),
+            text=(
+                f"Food poll — {poll_date} | Total {sum(counts.values())} | "
+                f"Updated {updated_at}"
+            ),
         )
     except Exception as e:
         logger.error(f"Failed to update poll message: {e}")

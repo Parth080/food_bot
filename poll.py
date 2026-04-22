@@ -1,7 +1,7 @@
-from datetime import date
+from datetime import datetime
 
 
-def build_poll_blocks(poll_date: str, counts: dict = None) -> list:
+def build_poll_blocks(poll_date: str, counts: dict = None, updated_at: str | None = None) -> list:
     """
     Builds the Slack Block Kit payload for the food poll.
     Optionally includes a live tally section if counts are passed.
@@ -12,6 +12,9 @@ def build_poll_blocks(poll_date: str, counts: dict = None) -> list:
         counts = {"great": 0, "okay": 0, "bad": 0}
 
     total = sum(counts.values())
+
+    if not updated_at:
+        updated_at = datetime.now().strftime("%H:%M:%S")
 
     blocks = [
         {
@@ -71,6 +74,15 @@ def build_poll_blocks(poll_date: str, counts: dict = None) -> list:
                     f"😞  Bad: *{counts['bad']}*"
                 ),
             },
+        },
+        {
+            "type": "context",
+            "elements": [
+                {
+                    "type": "mrkdwn",
+                    "text": f"Last updated: `{updated_at}`",
+                }
+            ],
         },
     ]
 

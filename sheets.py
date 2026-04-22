@@ -18,15 +18,23 @@ SPREADSHEET_ID = os.environ.get("GOOGLE_SHEET_ID")
 RAW_SHEET = "Raw Votes"
 SUMMARY_SHEET = "Daily Summary"
 
-RAW_HEADERS = ["Date", "Time", "User ID", "User Name", "Vote", "Remarks"]
+# Row 1 on each tab — explicit names for Sheets / Excel export
+RAW_HEADERS = [
+    "Date (poll day)",
+    "Time (vote logged)",
+    "Slack user ID",
+    "Voter display name",
+    "Vote (great / okay / bad)",
+    "Remarks (okay & bad only)",
+]
 SUMMARY_HEADERS = [
-    "Date",
-    "Great 😍",
-    "Okay 😐",
-    "Bad 😞",
-    "Total Votes",
-    "Okay remarks",
-    "Bad remarks",
+    "Date (poll day)",
+    "Great — vote count",
+    "Okay — vote count",
+    "Bad — vote count",
+    "Total votes",
+    "Okay — all remarks (name: text, one per line)",
+    "Bad — all remarks (name: text, one per line)",
 ]
 
 

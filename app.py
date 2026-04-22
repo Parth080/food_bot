@@ -142,6 +142,10 @@ def on_vote_remarks_modal_submit(ack, body, client, view):
 flask_app = Flask(__name__)
 handler = SlackRequestHandler(bolt_app)
 
+# Gunicorn on Render never runs `if __name__ == "__main__"` — ensure sheet row 1 headers exist.
+logger.info("Ensuring Google Sheet column headers…")
+ensure_sheet_headers()
+
 
 @flask_app.route("/slack/events", methods=["POST"])
 def slack_events():

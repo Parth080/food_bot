@@ -212,18 +212,61 @@ def ensure_sheet_headers():
         logger.error(f"Unexpected error in ensure_sheet_headers: {e}")
 
 
+def _read_raw_votes_rows(service) -> list[list[str]]:
+    """Reads all data rows from Raw Votes (excluding header)."""
+    result = (
+        service.spreadsheets()
+        .values()
+        .get(spreadsheetId=SPREADSHEET_ID, range=f"{RAW_SHEET}!A2:F")
+        .execute()
+    )
+    return result.get("values", [])
+
+
+def get_user_vote_for_date(poll_date: str, user_id: str) -> str | None:
+    """Returns existing choice (great/okay/bad) for user on poll_date, if any."""
+    try:
+        service = _get_service()
+        rows = _read_raw_votes_rows(service)
+        for row in rows:
+            if len(row) >= 5 and row[0] == poll_date and row[2] == user_id:
+                return row[4]
+        return None
+    except HttpError as e:
+        logger.error(f"Google Sheets HttpError checking duplicate vote: {e}")
+        return None
+    except Exception as e:
+        logger.error(f"Unexpected error checking duplicate vote: {e}")
+        return None
+
+
+def get_counts_from_raw_votes(poll_date: str) -> dict:
+    """Computes great/okay/bad counts for poll_date from Raw Votes rows."""
+    counts = {"great": 0, "okay": 0, "bad": 0}
+    try:
+        service = _get_service()
+        rows = _read_raw_votes_rows(service)
+        for row in rows:
+            if len(row) < 5 or row[0] != poll_date:
+                continue
+            vote = row[4]
+            if vote in counts:
+                counts[vote] += 1
+        return counts
+    except HttpError as e:
+        logger.error(f"Google Sheets HttpError reading counts: {e}")
+        return counts
+    except Exception as e:
+        logger.error(f"Unexpected error reading counts: {e}")
+        return counts
+
+
 def _aggregate_remarks_for_date(service, poll_date: str) -> tuple[str, str]:
     """
     Reads Raw Votes for poll_date and builds newline-separated "Name: remark" lists
     for okay and bad rows (non-empty remarks only).
     """
-    sheet = service.spreadsheets()
-    result = (
-        sheet.values()
-        .get(spreadsheetId=SPREADSHEET_ID, range=f"{RAW_SHEET}!A2:F")
-        .execute()
-    )
-    rows = result.get("values", [])
+    rows = _read_raw_votes_rows(service)
     okay_lines: list[str] = []
     bad_lines: list[str] = []
 

@@ -3,13 +3,15 @@ import logging
 import os
 from datetime import date
 
-import vote_store
 from poll import build_poll_blocks
-from sheets import append_vote, update_daily_summary
+from sheets import (
+    append_vote,
+    get_counts_from_raw_votes,
+    get_user_vote_for_date,
+    update_daily_summary,
+)
 
 logger = logging.getLogger(__name__)
-
-CHANNEL_ID = os.environ.get("SLACK_CHANNEL_ID")
 
 # Must match Slack modal callback_id and Bolt @app.view registration
 VOTE_REMARKS_CALLBACK_ID = "vote_remarks_modal"
@@ -33,8 +35,8 @@ def open_vote_remarks_modal(body: dict, client, action: dict) -> None:
     poll_date = _poll_date_from_action(action) or str(date.today())
     channel_id = body["container"]["channel_id"]
 
-    if vote_store.has_voted(poll_date, user_id):
-        previous = vote_store.get_previous_vote(poll_date, user_id)
+    previous = get_user_vote_for_date(poll_date, user_id)
+    if previous:
         client.chat_postEphemeral(
             channel=channel_id,
             user=user_id,
@@ -128,7 +130,7 @@ def handle_remarks_modal_submit(body: dict, client, view: dict) -> None:
         or ""
     ).strip()
 
-    if vote_store.has_voted(poll_date, user_id):
+    if get_user_vote_for_date(poll_date, user_id):
         client.chat_postEphemeral(
             channel=channel_id,
             user=user_id,
@@ -172,8 +174,8 @@ def process_vote(
         remark = ""
 
     # --- Deduplication ---
-    if vote_store.has_voted(poll_date, user_id):
-        previous = vote_store.get_previous_vote(poll_date, user_id)
+    previous = get_user_vote_for_date(poll_date, user_id)
+    if previous:
         client.chat_postEphemeral(
             channel=channel_id,
             user=user_id,
@@ -185,14 +187,11 @@ def process_vote(
     # --- Get user's display name from Slack ---
     user_name = _get_user_name(client, user_id)
 
-    # --- Record in memory first (fast, thread-safe) ---
-    vote_store.record_vote(poll_date, user_id, choice)
-
     # --- Write to Google Sheets ---
     append_vote(poll_date, user_id, user_name, choice, remark=remark)
 
-    # --- Update the daily summary tab ---
-    counts = vote_store.get_counts(poll_date)
+    # --- Recalculate counts from Raw Votes (single source of truth) ---
+    counts = get_counts_from_raw_votes(poll_date)
     update_daily_summary(poll_date, counts)
 
     # --- Update the poll message with live count ---

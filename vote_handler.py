@@ -1,7 +1,7 @@
 import json
 import logging
 import os
-from datetime import date, datetime
+from datetime import date
 
 from poll import build_poll_blocks
 from sheets import (
@@ -28,8 +28,8 @@ def _poll_date_from_action(action: dict) -> str | None:
 
 def open_vote_remarks_modal(body: dict, client, action: dict) -> None:
     """
-    For Okay / Bad: open a modal with an optional remark before recording the vote.
-    Great votes skip this and call process_vote directly.
+    For ratings 4/5: open a modal with an optional remark before recording the vote.
+    Ratings 1/2/3 skip this and call process_vote directly.
     """
     user_id = body["user"]["id"]
     poll_date = _poll_date_from_action(action) or str(date.today())
@@ -45,7 +45,7 @@ def open_vote_remarks_modal(body: dict, client, action: dict) -> None:
         logger.info(f"Duplicate vote blocked (modal): {user_id} already voted {previous}")
         return
 
-    choice = action["value"]
+    choice = action["value"]  # "4" | "5"
     meta = json.dumps(
         {
             "poll_date": poll_date,
@@ -72,7 +72,7 @@ def open_vote_remarks_modal(body: dict, client, action: dict) -> None:
                             "type": "mrkdwn",
                             "text": (
                                 f"*You chose {_label(choice)}.*\n"
-                                "Optional: add a short note if you want (feedback helps the kitchen)."
+                                "Optional: add a short note if you want."
                             ),
                         },
                     },
@@ -87,7 +87,7 @@ def open_vote_remarks_modal(body: dict, client, action: dict) -> None:
                             "max_length": 2000,
                             "placeholder": {
                                 "type": "plain_text",
-                                "text": "e.g. Portion small, too oily, rice was great but …",
+                                "text": "Optional comment for your rating...",
                             },
                         },
                         "label": {"type": "plain_text", "text": "Remarks"},
@@ -105,7 +105,7 @@ def open_vote_remarks_modal(body: dict, client, action: dict) -> None:
 
 
 def handle_remarks_modal_submit(body: dict, client, view: dict) -> None:
-    """After user submits Okay/Bad + remark from the modal."""
+    """After user submits rating 4/5 + optional remark from the modal."""
     user_id = body["user"]["id"]
     try:
         meta = json.loads(view.get("private_metadata") or "{}")
@@ -118,7 +118,7 @@ def handle_remarks_modal_submit(body: dict, client, view: dict) -> None:
     message_ts = meta.get("message_ts")
     choice = meta.get("choice")
 
-    if not channel_id or not message_ts or choice not in ("okay", "bad"):
+    if not channel_id or not message_ts or choice not in ("4", "5"):
         logger.error("Modal metadata missing channel, ts, or choice")
         return
 
@@ -160,17 +160,17 @@ def process_vote(
     poll_date: str | None = None,
 ):
     """
-    Central handler for recording a vote (button Great, or Okay/Bad after modal).
+    Central handler for recording a vote (1/2/3 direct, or 4/5 after modal).
     Called after ack() so we have full time to do Sheets writes.
     """
     user_id = body["user"]["id"]
-    choice = action["value"]  # "great" | "okay" | "bad"
+    choice = action["value"]  # "1" | "2" | "3" | "4" | "5"
     poll_date = poll_date or _poll_date_from_action(action) or str(date.today())
     channel_id = body["container"]["channel_id"]
     message_ts = body["container"]["message_ts"]
 
     remark = (remark or "").strip()
-    if choice == "great":
+    if choice in ("1", "2", "3"):
         remark = ""
 
     # --- Deduplication ---
@@ -199,7 +199,7 @@ def process_vote(
 
     # --- Confirm to the voter privately ---
     thanks = f"Got your vote: {_label(choice)} ✅  Thanks {user_name.split()[0]}!"
-    if remark and choice in ("okay", "bad"):
+    if remark and choice in ("4", "5"):
         thanks += f"\n_Your note:_ {remark}"
     client.chat_postEphemeral(
         channel=channel_id,
@@ -213,15 +213,11 @@ def process_vote(
 def _refresh_poll_message(client, channel_id: str, message_ts: str, poll_date: str, counts: dict):
     """Updates the original poll message with the latest vote counts."""
     try:
-        updated_at = datetime.now().strftime("%H:%M:%S")
         client.chat_update(
             channel=channel_id,
             ts=message_ts,
-            blocks=build_poll_blocks(poll_date, counts, updated_at=updated_at),
-            text=(
-                f"Food poll — {poll_date} | Total {sum(counts.values())} | "
-                f"Updated {updated_at}"
-            ),
+            blocks=build_poll_blocks(poll_date, counts),
+            text=f"Food poll — {poll_date} | Total {sum(counts.values())}",
         )
     except Exception as e:
         logger.error(f"Failed to update poll message: {e}")
@@ -239,4 +235,10 @@ def _get_user_name(client, user_id: str) -> str:
 
 
 def _label(choice: str) -> str:
-    return {"great": "😍 Great", "okay": "😐 Okay", "bad": "😞 Bad"}.get(choice, choice)
+    return {
+        "1": "1",
+        "2": "2",
+        "3": "3",
+        "4": "4",
+        "5": "5",
+    }.get(choice, choice)

@@ -114,20 +114,32 @@ def handle_startpoll(ack, body, client):
 
 
 # ── Vote Button Handlers ──────────────────────────────────────────────────────
-@bolt_app.action("vote_great")
-def on_vote_great(ack, body, client, action):
+@bolt_app.action("vote_1")
+def on_vote_1(ack, body, client, action):
     ack()
     process_vote(body, client, action)
 
 
-@bolt_app.action("vote_okay")
-def on_vote_okay(ack, body, client, action):
+@bolt_app.action("vote_2")
+def on_vote_2(ack, body, client, action):
+    ack()
+    process_vote(body, client, action)
+
+
+@bolt_app.action("vote_3")
+def on_vote_3(ack, body, client, action):
+    ack()
+    process_vote(body, client, action)
+
+
+@bolt_app.action("vote_4")
+def on_vote_4(ack, body, client, action):
     ack()
     open_vote_remarks_modal(body, client, action)
 
 
-@bolt_app.action("vote_bad")
-def on_vote_bad(ack, body, client, action):
+@bolt_app.action("vote_5")
+def on_vote_5(ack, body, client, action):
     ack()
     open_vote_remarks_modal(body, client, action)
 

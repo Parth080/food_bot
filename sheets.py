@@ -5,6 +5,7 @@ import logging
 import os
 import urllib.parse
 from datetime import datetime
+from zoneinfo import ZoneInfo
 from google.oauth2 import service_account
 from googleapiclient.discovery import build
 from googleapiclient.errors import HttpError
@@ -13,6 +14,7 @@ logger = logging.getLogger(__name__)
 
 SCOPES = ["https://www.googleapis.com/auth/spreadsheets"]
 SPREADSHEET_ID = os.environ.get("GOOGLE_SHEET_ID")
+APP_TIMEZONE = os.environ.get("APP_TIMEZONE", "Asia/Kolkata")
 
 # Sheet tab names
 RAW_SHEET = "Raw Votes"
@@ -24,17 +26,19 @@ RAW_HEADERS = [
     "Time (vote logged)",
     "Slack user ID",
     "Voter display name",
-    "Vote (great / okay / bad)",
-    "Remarks (okay & bad only)",
+    "Rating (1 to 5)",
+    "Comments (optional for rating 4/5)",
 ]
 SUMMARY_HEADERS = [
     "Date (poll day)",
-    "Great — vote count",
-    "Okay — vote count",
-    "Bad — vote count",
+    "Rating 1 — vote count",
+    "Rating 2 — vote count",
+    "Rating 3 — vote count",
+    "Rating 4 — vote count",
+    "Rating 5 — vote count",
     "Total votes",
-    "Okay — all remarks (name: text, one per line)",
-    "Bad — all remarks (name: text, one per line)",
+    "Rating 4 — all comments (name: text, one per line)",
+    "Rating 5 — all comments (name: text, one per line)",
 ]
 
 _SERVICE = None
@@ -188,10 +192,10 @@ def ensure_sheet_headers():
             ).execute()
             logger.info("Updated Raw Votes header row (added Remarks / normalized)")
 
-        # Daily Summary: counts + aggregated remark columns (7 columns)
+        # Daily Summary: rating counts + aggregated comment columns (9 columns)
         result2 = (
             sheet.values()
-            .get(spreadsheetId=SPREADSHEET_ID, range=f"{SUMMARY_SHEET}!A1:G1")
+            .get(spreadsheetId=SPREADSHEET_ID, range=f"{SUMMARY_SHEET}!A1:I1")
             .execute()
         )
         row2 = (result2.get("values") or [[]])[0]
@@ -199,7 +203,7 @@ def ensure_sheet_headers():
         if not row2:
             sheet.values().update(
                 spreadsheetId=SPREADSHEET_ID,
-                range=f"{SUMMARY_SHEET}!A1:G1",
+                range=f"{SUMMARY_SHEET}!A1:I1",
                 valueInputOption="RAW",
                 body={"values": [SUMMARY_HEADERS]},
             ).execute()
@@ -207,7 +211,7 @@ def ensure_sheet_headers():
         elif len(row2) < len(SUMMARY_HEADERS) or row2[: len(SUMMARY_HEADERS)] != SUMMARY_HEADERS:
             sheet.values().update(
                 spreadsheetId=SPREADSHEET_ID,
-                range=f"{SUMMARY_SHEET}!A1:G1",
+                range=f"{SUMMARY_SHEET}!A1:I1",
                 valueInputOption="RAW",
                 body={"values": [SUMMARY_HEADERS]},
             ).execute()
@@ -248,8 +252,8 @@ def get_user_vote_for_date(poll_date: str, user_id: str) -> str | None:
 
 
 def get_counts_from_raw_votes(poll_date: str) -> dict:
-    """Computes great/okay/bad counts for poll_date from Raw Votes rows."""
-    counts = {"great": 0, "okay": 0, "bad": 0}
+    """Computes rating 1..5 counts for poll_date from Raw Votes rows."""
+    counts = {"1": 0, "2": 0, "3": 0, "4": 0, "5": 0}
     try:
         service = _get_service()
         rows = _read_raw_votes_rows(service)
@@ -271,11 +275,11 @@ def get_counts_from_raw_votes(poll_date: str) -> dict:
 def _aggregate_remarks_for_date(service, poll_date: str) -> tuple[str, str]:
     """
     Reads Raw Votes for poll_date and builds newline-separated "Name: remark" lists
-    for okay and bad rows (non-empty remarks only).
+    for rating 4 and rating 5 rows (non-empty remarks only).
     """
     rows = _read_raw_votes_rows(service)
-    okay_lines: list[str] = []
-    bad_lines: list[str] = []
+    rating4_lines: list[str] = []
+    rating5_lines: list[str] = []
 
     for row in rows:
         if not row or row[0] != poll_date:
@@ -286,12 +290,12 @@ def _aggregate_remarks_for_date(service, poll_date: str) -> tuple[str, str]:
             continue
         name = row[3] if len(row) > 3 else ""
         line = f"{name}: {remark}" if name else remark
-        if vote == "okay":
-            okay_lines.append(line)
-        elif vote == "bad":
-            bad_lines.append(line)
+        if vote == "4":
+            rating4_lines.append(line)
+        elif vote == "5":
+            rating5_lines.append(line)
 
-    return "\n".join(okay_lines), "\n".join(bad_lines)
+    return "\n".join(rating4_lines), "\n".join(rating5_lines)
 
 
 def append_vote(
@@ -303,11 +307,11 @@ def append_vote(
 ):
     """
     Appends one row to the Raw Votes tab immediately after a vote is cast.
-    remark is stored for okay/bad; empty for great.
+    remark is stored for ratings 4/5; empty for ratings 1/2/3.
     """
     try:
         service = _get_service()
-        now = datetime.now().strftime("%H:%M:%S")
+        now = datetime.now(ZoneInfo(APP_TIMEZONE)).strftime("%H:%M:%S")
         remark_cell = (remark or "").strip()
 
         service.spreadsheets().values().append(
@@ -355,22 +359,24 @@ def update_daily_summary(poll_date: str, counts: dict):
                 break
 
         total = sum(counts.values())
-        okay_remarks, bad_remarks = _aggregate_remarks_for_date(service, poll_date)
+        rating4_remarks, rating5_remarks = _aggregate_remarks_for_date(service, poll_date)
         row_data = [
             poll_date,
-            counts.get("great", 0),
-            counts.get("okay", 0),
-            counts.get("bad", 0),
+            counts.get("1", 0),
+            counts.get("2", 0),
+            counts.get("3", 0),
+            counts.get("4", 0),
+            counts.get("5", 0),
             total,
-            okay_remarks,
-            bad_remarks,
+            rating4_remarks,
+            rating5_remarks,
         ]
 
         if target_row:
             # Update existing row
             sheet.values().update(
                 spreadsheetId=SPREADSHEET_ID,
-                range=f"{SUMMARY_SHEET}!A{target_row}:G{target_row}",
+                range=f"{SUMMARY_SHEET}!A{target_row}:I{target_row}",
                 valueInputOption="RAW",
                 body={"values": [row_data]},
             ).execute()
@@ -378,7 +384,7 @@ def update_daily_summary(poll_date: str, counts: dict):
             # Append new row
             sheet.values().append(
                 spreadsheetId=SPREADSHEET_ID,
-                range=f"{SUMMARY_SHEET}!A:G",
+                range=f"{SUMMARY_SHEET}!A:I",
                 valueInputOption="RAW",
                 insertDataOption="INSERT_ROWS",
                 body={"values": [row_data]},

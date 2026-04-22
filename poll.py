@@ -1,20 +1,14 @@
-from datetime import datetime
-
-
-def build_poll_blocks(poll_date: str, counts: dict = None, updated_at: str | None = None) -> list:
+def build_poll_blocks(poll_date: str, counts: dict = None) -> list:
     """
     Builds the Slack Block Kit payload for the food poll.
     Optionally includes a live tally section if counts are passed.
 
-    counts = {"great": 0, "okay": 0, "bad": 0}
+    counts = {"1": 0, "2": 0, "3": 0, "4": 0, "5": 0}
     """
     if counts is None:
-        counts = {"great": 0, "okay": 0, "bad": 0}
+        counts = {"1": 0, "2": 0, "3": 0, "4": 0, "5": 0}
 
     total = sum(counts.values())
-
-    if not updated_at:
-        updated_at = datetime.now().strftime("%H:%M:%S")
 
     blocks = [
         {
@@ -29,11 +23,7 @@ def build_poll_blocks(poll_date: str, counts: dict = None, updated_at: str | Non
             "type": "section",
             "text": {
                 "type": "mrkdwn",
-                "text": (
-                    "*How was the food today?* Cast your vote below 👇\n"
-                    "_Each person gets one vote. Results update live._\n"
-                    "_Okay / Bad: you can add an optional note in a quick form after you click._"
-                ),
+                "text": "*Rate today's food from 1 to 5*",
             },
         },
         {
@@ -42,23 +32,35 @@ def build_poll_blocks(poll_date: str, counts: dict = None, updated_at: str | Non
             "elements": [
                 {
                     "type": "button",
-                    "text": {"type": "plain_text", "text": "😍  Great", "emoji": True},
-                    "value": "great",
-                    "action_id": "vote_great",
+                    "text": {"type": "plain_text", "text": "1", "emoji": True},
+                    "value": "1",
+                    "action_id": "vote_1",
+                },
+                {
+                    "type": "button",
+                    "text": {"type": "plain_text", "text": "2", "emoji": True},
+                    "value": "2",
+                    "action_id": "vote_2",
+                },
+                {
+                    "type": "button",
+                    "text": {"type": "plain_text", "text": "3", "emoji": True},
+                    "value": "3",
+                    "action_id": "vote_3",
+                },
+                {
+                    "type": "button",
+                    "text": {"type": "plain_text", "text": "4", "emoji": True},
+                    "value": "4",
+                    "action_id": "vote_4",
                     "style": "primary",
                 },
                 {
                     "type": "button",
-                    "text": {"type": "plain_text", "text": "😐  Okay", "emoji": True},
-                    "value": "okay",
-                    "action_id": "vote_okay",
-                },
-                {
-                    "type": "button",
-                    "text": {"type": "plain_text", "text": "😞  Bad", "emoji": True},
-                    "value": "bad",
-                    "action_id": "vote_bad",
-                    "style": "danger",
+                    "text": {"type": "plain_text", "text": "5", "emoji": True},
+                    "value": "5",
+                    "action_id": "vote_5",
+                    "style": "primary",
                 },
             ],
         },
@@ -69,20 +71,13 @@ def build_poll_blocks(poll_date: str, counts: dict = None, updated_at: str | Non
                 "type": "mrkdwn",
                 "text": (
                     f"*Live results — {total} vote{'s' if total != 1 else ''}*\n"
-                    f"😍  Great: *{counts['great']}*    "
-                    f"😐  Okay: *{counts['okay']}*    "
-                    f"😞  Bad: *{counts['bad']}*"
+                    f"1: *{counts['1']}*    "
+                    f"2: *{counts['2']}*    "
+                    f"3: *{counts['3']}*    "
+                    f"4: *{counts['4']}*    "
+                    f"5: *{counts['5']}*"
                 ),
             },
-        },
-        {
-            "type": "context",
-            "elements": [
-                {
-                    "type": "mrkdwn",
-                    "text": f"Last updated: `{updated_at}`",
-                }
-            ],
         },
     ]
 

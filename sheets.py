@@ -37,6 +37,8 @@ SUMMARY_HEADERS = [
     "Bad — all remarks (name: text, one per line)",
 ]
 
+_SERVICE = None
+
 
 def _normalize_private_key(pem: str) -> str:
     """Render/.env often store PEM as one line with literal \\n sequences."""
@@ -138,13 +140,18 @@ def _load_service_account_info() -> dict:
 
 
 def _get_service():
-    """Builds the Google Sheets API service using service account credentials from env."""
+    """Builds (once per process) the Google Sheets API service from env creds."""
+    global _SERVICE
+    if _SERVICE is not None:
+        return _SERVICE
+
     creds_dict = _load_service_account_info()
     creds = service_account.Credentials.from_service_account_info(
         creds_dict, scopes=SCOPES
     )
-    service = build("sheets", "v4", credentials=creds)
-    return service
+    # Avoid discovery cache overhead and repeated client construction noise.
+    _SERVICE = build("sheets", "v4", credentials=creds, cache_discovery=False)
+    return _SERVICE
 
 
 def ensure_sheet_headers():

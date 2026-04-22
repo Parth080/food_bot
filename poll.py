@@ -23,7 +23,7 @@ def build_poll_blocks(poll_date: str, counts: dict = None) -> list:
             "type": "section",
             "text": {
                 "type": "mrkdwn",
-                "text": "*Rate today's food from 1 to 5*",
+                "text": "*How was today's food?*\nRate from *1 (lowest)* to *5 (highest)*.",
             },
         },
         {
@@ -32,36 +32,48 @@ def build_poll_blocks(poll_date: str, counts: dict = None) -> list:
             "elements": [
                 {
                     "type": "button",
-                    "text": {"type": "plain_text", "text": "1", "emoji": True},
+                    "text": {"type": "plain_text", "text": "1  😞", "emoji": True},
                     "value": "1",
                     "action_id": "vote_1",
+                    "style": "danger",
                 },
                 {
                     "type": "button",
-                    "text": {"type": "plain_text", "text": "2", "emoji": True},
+                    "text": {"type": "plain_text", "text": "2  🙁", "emoji": True},
                     "value": "2",
                     "action_id": "vote_2",
                 },
                 {
                     "type": "button",
-                    "text": {"type": "plain_text", "text": "3", "emoji": True},
+                    "text": {"type": "plain_text", "text": "3  😐", "emoji": True},
                     "value": "3",
                     "action_id": "vote_3",
                 },
                 {
                     "type": "button",
-                    "text": {"type": "plain_text", "text": "4", "emoji": True},
+                    "text": {"type": "plain_text", "text": "4  🙂", "emoji": True},
                     "value": "4",
                     "action_id": "vote_4",
                     "style": "primary",
                 },
                 {
                     "type": "button",
-                    "text": {"type": "plain_text", "text": "5", "emoji": True},
+                    "text": {"type": "plain_text", "text": "5  🤩", "emoji": True},
                     "value": "5",
                     "action_id": "vote_5",
                     "style": "primary",
                 },
+            ],
+        },
+        {
+            "type": "actions",
+            "elements": [
+                {
+                    "type": "button",
+                    "text": {"type": "plain_text", "text": "Add Comment", "emoji": True},
+                    "value": "comment",
+                    "action_id": "add_comment",
+                }
             ],
         },
         {"type": "divider"},

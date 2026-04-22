@@ -27,7 +27,7 @@ RAW_HEADERS = [
     "Slack user ID",
     "Voter display name",
     "Rating (1 to 5)",
-    "Comments (optional for rating 4/5)",
+    "Comment (optional, independent of rating)",
 ]
 SUMMARY_HEADERS = [
     "Date (poll day)",
@@ -37,8 +37,7 @@ SUMMARY_HEADERS = [
     "Rating 4 — vote count",
     "Rating 5 — vote count",
     "Total votes",
-    "Rating 4 — all comments (name: text, one per line)",
-    "Rating 5 — all comments (name: text, one per line)",
+    "All comments (name: text, one per line)",
 ]
 
 _SERVICE = None
@@ -192,10 +191,10 @@ def ensure_sheet_headers():
             ).execute()
             logger.info("Updated Raw Votes header row (added Remarks / normalized)")
 
-        # Daily Summary: rating counts + aggregated comment columns (9 columns)
+        # Daily Summary: rating counts + aggregated comment column (8 columns)
         result2 = (
             sheet.values()
-            .get(spreadsheetId=SPREADSHEET_ID, range=f"{SUMMARY_SHEET}!A1:I1")
+            .get(spreadsheetId=SPREADSHEET_ID, range=f"{SUMMARY_SHEET}!A1:H1")
             .execute()
         )
         row2 = (result2.get("values") or [[]])[0]
@@ -203,7 +202,7 @@ def ensure_sheet_headers():
         if not row2:
             sheet.values().update(
                 spreadsheetId=SPREADSHEET_ID,
-                range=f"{SUMMARY_SHEET}!A1:I1",
+                range=f"{SUMMARY_SHEET}!A1:H1",
                 valueInputOption="RAW",
                 body={"values": [SUMMARY_HEADERS]},
             ).execute()
@@ -211,7 +210,7 @@ def ensure_sheet_headers():
         elif len(row2) < len(SUMMARY_HEADERS) or row2[: len(SUMMARY_HEADERS)] != SUMMARY_HEADERS:
             sheet.values().update(
                 spreadsheetId=SPREADSHEET_ID,
-                range=f"{SUMMARY_SHEET}!A1:I1",
+                range=f"{SUMMARY_SHEET}!A1:H1",
                 valueInputOption="RAW",
                 body={"values": [SUMMARY_HEADERS]},
             ).execute()
@@ -235,12 +234,12 @@ def _read_raw_votes_rows(service) -> list[list[str]]:
 
 
 def get_user_vote_for_date(poll_date: str, user_id: str) -> str | None:
-    """Returns existing choice (great/okay/bad) for user on poll_date, if any."""
+    """Returns existing rating (1..5) for user on poll_date, if any."""
     try:
         service = _get_service()
         rows = _read_raw_votes_rows(service)
         for row in rows:
-            if len(row) >= 5 and row[0] == poll_date and row[2] == user_id:
+            if len(row) >= 5 and row[0] == poll_date and row[2] == user_id and row[4] in {"1", "2", "3", "4", "5"}:
                 return row[4]
         return None
     except HttpError as e:
@@ -272,14 +271,13 @@ def get_counts_from_raw_votes(poll_date: str) -> dict:
         return counts
 
 
-def _aggregate_remarks_for_date(service, poll_date: str) -> tuple[str, str]:
+def _aggregate_comments_for_date(service, poll_date: str) -> str:
     """
-    Reads Raw Votes for poll_date and builds newline-separated "Name: remark" lists
-    for rating 4 and rating 5 rows (non-empty remarks only).
+    Reads Raw Votes for poll_date and builds newline-separated "Name: comment" lines
+    for all rows with non-empty comments.
     """
     rows = _read_raw_votes_rows(service)
-    rating4_lines: list[str] = []
-    rating5_lines: list[str] = []
+    lines: list[str] = []
 
     for row in rows:
         if not row or row[0] != poll_date:
@@ -290,12 +288,8 @@ def _aggregate_remarks_for_date(service, poll_date: str) -> tuple[str, str]:
             continue
         name = row[3] if len(row) > 3 else ""
         line = f"{name}: {remark}" if name else remark
-        if vote == "4":
-            rating4_lines.append(line)
-        elif vote == "5":
-            rating5_lines.append(line)
-
-    return "\n".join(rating4_lines), "\n".join(rating5_lines)
+        lines.append(line)
+    return "\n".join(lines)
 
 
 def append_vote(
@@ -307,7 +301,7 @@ def append_vote(
 ):
     """
     Appends one row to the Raw Votes tab immediately after a vote is cast.
-    remark is stored for ratings 4/5; empty for ratings 1/2/3.
+    Stores one row in Raw Votes. `choice` may be blank for comment-only submissions.
     """
     try:
         service = _get_service()
@@ -359,7 +353,7 @@ def update_daily_summary(poll_date: str, counts: dict):
                 break
 
         total = sum(counts.values())
-        rating4_remarks, rating5_remarks = _aggregate_remarks_for_date(service, poll_date)
+        all_comments = _aggregate_comments_for_date(service, poll_date)
         row_data = [
             poll_date,
             counts.get("1", 0),
@@ -368,15 +362,14 @@ def update_daily_summary(poll_date: str, counts: dict):
             counts.get("4", 0),
             counts.get("5", 0),
             total,
-            rating4_remarks,
-            rating5_remarks,
+            all_comments,
         ]
 
         if target_row:
             # Update existing row
             sheet.values().update(
                 spreadsheetId=SPREADSHEET_ID,
-                range=f"{SUMMARY_SHEET}!A{target_row}:I{target_row}",
+                range=f"{SUMMARY_SHEET}!A{target_row}:H{target_row}",
                 valueInputOption="RAW",
                 body={"values": [row_data]},
             ).execute()
@@ -384,7 +377,7 @@ def update_daily_summary(poll_date: str, counts: dict):
             # Append new row
             sheet.values().append(
                 spreadsheetId=SPREADSHEET_ID,
-                range=f"{SUMMARY_SHEET}!A:I",
+                range=f"{SUMMARY_SHEET}!A:H",
                 valueInputOption="RAW",
                 insertDataOption="INSERT_ROWS",
                 body={"values": [row_data]},

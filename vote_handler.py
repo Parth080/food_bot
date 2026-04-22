@@ -14,7 +14,7 @@ from sheets import (
 logger = logging.getLogger(__name__)
 
 # Must match Slack modal callback_id and Bolt @app.view registration
-VOTE_REMARKS_CALLBACK_ID = "vote_remarks_modal"
+COMMENT_MODAL_CALLBACK_ID = "comment_modal"
 
 
 def _poll_date_from_action(action: dict) -> str | None:
@@ -26,32 +26,15 @@ def _poll_date_from_action(action: dict) -> str | None:
     return None
 
 
-def open_vote_remarks_modal(body: dict, client, action: dict) -> None:
-    """
-    For ratings 4/5: open a modal with an optional remark before recording the vote.
-    Ratings 1/2/3 skip this and call process_vote directly.
-    """
-    user_id = body["user"]["id"]
+def open_comment_modal(body: dict, client, action: dict) -> None:
+    """Opens a standalone comment modal; comments are independent of rating votes."""
     poll_date = _poll_date_from_action(action) or str(date.today())
     channel_id = body["container"]["channel_id"]
-
-    previous = get_user_vote_for_date(poll_date, user_id)
-    if previous:
-        client.chat_postEphemeral(
-            channel=channel_id,
-            user=user_id,
-            text=f"You already voted *{_label(previous)}* today. Votes are final — thanks! 🙏",
-        )
-        logger.info(f"Duplicate vote blocked (modal): {user_id} already voted {previous}")
-        return
-
-    choice = action["value"]  # "4" | "5"
     meta = json.dumps(
         {
             "poll_date": poll_date,
             "channel_id": channel_id,
             "message_ts": body["container"]["message_ts"],
-            "choice": choice,
         }
     )
 
@@ -60,37 +43,34 @@ def open_vote_remarks_modal(body: dict, client, action: dict) -> None:
             trigger_id=body["trigger_id"],
             view={
                 "type": "modal",
-                "callback_id": VOTE_REMARKS_CALLBACK_ID,
+                "callback_id": COMMENT_MODAL_CALLBACK_ID,
                 "private_metadata": meta,
-                "title": {"type": "plain_text", "text": "Food feedback"},
-                "submit": {"type": "plain_text", "text": "Submit vote"},
+                "title": {"type": "plain_text", "text": "Add comment"},
+                "submit": {"type": "plain_text", "text": "Submit"},
                 "close": {"type": "plain_text", "text": "Cancel"},
                 "blocks": [
                     {
                         "type": "section",
                         "text": {
                             "type": "mrkdwn",
-                            "text": (
-                                f"*You chose {_label(choice)}.*\n"
-                                "Optional: add a short note if you want."
-                            ),
+                            "text": "Share any feedback for today's food (optional).",
                         },
                     },
                     {
                         "type": "input",
-                        "block_id": "remark_block",
+                        "block_id": "comment_block",
                         "optional": True,
                         "element": {
                             "type": "plain_text_input",
-                            "action_id": "remark_text",
+                            "action_id": "comment_text",
                             "multiline": True,
                             "max_length": 2000,
                             "placeholder": {
                                 "type": "plain_text",
-                                "text": "Optional comment for your rating...",
+                                "text": "Type your comment here...",
                             },
                         },
-                        "label": {"type": "plain_text", "text": "Remarks"},
+                        "label": {"type": "plain_text", "text": "Comment"},
                     },
                 ],
             },
@@ -99,13 +79,13 @@ def open_vote_remarks_modal(body: dict, client, action: dict) -> None:
         logger.error(f"views_open failed: {e}")
         client.chat_postEphemeral(
             channel=channel_id,
-            user=user_id,
+            user=body["user"]["id"],
             text="❌ Could not open feedback form. Please try again or contact an admin.",
         )
 
 
-def handle_remarks_modal_submit(body: dict, client, view: dict) -> None:
-    """After user submits rating 4/5 + optional remark from the modal."""
+def handle_comment_modal_submit(body: dict, client, view: dict) -> None:
+    """After user submits a standalone comment from the modal."""
     user_id = body["user"]["id"]
     try:
         meta = json.loads(view.get("private_metadata") or "{}")
@@ -116,39 +96,35 @@ def handle_remarks_modal_submit(body: dict, client, view: dict) -> None:
     poll_date = meta.get("poll_date") or str(date.today())
     channel_id = meta.get("channel_id")
     message_ts = meta.get("message_ts")
-    choice = meta.get("choice")
-
-    if not channel_id or not message_ts or choice not in ("4", "5"):
-        logger.error("Modal metadata missing channel, ts, or choice")
+    if not channel_id or not message_ts:
+        logger.error("Comment modal metadata missing channel or ts")
         return
 
     values = view.get("state", {}).get("values", {})
-    remark = (
-        values.get("remark_block", {})
-        .get("remark_text", {})
+    comment = (
+        values.get("comment_block", {})
+        .get("comment_text", {})
         .get("value", "")
         or ""
     ).strip()
-
-    if get_user_vote_for_date(poll_date, user_id):
+    if not comment:
         client.chat_postEphemeral(
             channel=channel_id,
             user=user_id,
-            text="You already voted today — this form was not saved. 🙏",
+            text="Comment was empty, so nothing was saved.",
         )
         return
 
-    synthetic_body = {
-        "user": {"id": user_id},
-        "container": {"channel_id": channel_id, "message_ts": message_ts},
-    }
-    synthetic_action = {"value": choice}
-    process_vote(
-        synthetic_body,
-        client,
-        synthetic_action,
-        remark=remark,
-        poll_date=poll_date,
+    user_name = _get_user_name(client, user_id)
+    append_vote(poll_date, user_id, user_name, choice="", remark=comment)
+    counts = get_counts_from_raw_votes(poll_date)
+    update_daily_summary(poll_date, counts)
+    _refresh_poll_message(client, channel_id, message_ts, poll_date, counts)
+
+    client.chat_postEphemeral(
+        channel=channel_id,
+        user=user_id,
+        text="Thanks! Your comment was saved.",
     )
 
 
@@ -156,7 +132,6 @@ def process_vote(
     body: dict,
     client,
     action: dict,
-    remark: str = "",
     poll_date: str | None = None,
 ):
     """
@@ -168,10 +143,6 @@ def process_vote(
     poll_date = poll_date or _poll_date_from_action(action) or str(date.today())
     channel_id = body["container"]["channel_id"]
     message_ts = body["container"]["message_ts"]
-
-    remark = (remark or "").strip()
-    if choice in ("1", "2", "3"):
-        remark = ""
 
     # --- Deduplication ---
     previous = get_user_vote_for_date(poll_date, user_id)
@@ -188,7 +159,7 @@ def process_vote(
     user_name = _get_user_name(client, user_id)
 
     # --- Write to Google Sheets ---
-    append_vote(poll_date, user_id, user_name, choice, remark=remark)
+    append_vote(poll_date, user_id, user_name, choice, remark="")
 
     # --- Recalculate counts from Raw Votes (single source of truth) ---
     counts = get_counts_from_raw_votes(poll_date)
@@ -199,8 +170,6 @@ def process_vote(
 
     # --- Confirm to the voter privately ---
     thanks = f"Got your vote: {_label(choice)} ✅  Thanks {user_name.split()[0]}!"
-    if remark and choice in ("4", "5"):
-        thanks += f"\n_Your note:_ {remark}"
     client.chat_postEphemeral(
         channel=channel_id,
         user=user_id,

@@ -14,9 +14,9 @@ from flask import Flask, request, jsonify
 
 from poll import build_poll_blocks
 from vote_handler import (
-    VOTE_REMARKS_CALLBACK_ID,
-    handle_remarks_modal_submit,
-    open_vote_remarks_modal,
+    COMMENT_MODAL_CALLBACK_ID,
+    handle_comment_modal_submit,
+    open_comment_modal,
     process_vote,
 )
 from sheets import ensure_sheet_headers
@@ -135,19 +135,25 @@ def on_vote_3(ack, body, client, action):
 @bolt_app.action("vote_4")
 def on_vote_4(ack, body, client, action):
     ack()
-    open_vote_remarks_modal(body, client, action)
+    process_vote(body, client, action)
 
 
 @bolt_app.action("vote_5")
 def on_vote_5(ack, body, client, action):
     ack()
-    open_vote_remarks_modal(body, client, action)
+    process_vote(body, client, action)
 
 
-@bolt_app.view(VOTE_REMARKS_CALLBACK_ID)
-def on_vote_remarks_modal_submit(ack, body, client, view):
+@bolt_app.action("add_comment")
+def on_add_comment(ack, body, client, action):
     ack()
-    handle_remarks_modal_submit(body, client, view)
+    open_comment_modal(body, client, action)
+
+
+@bolt_app.view(COMMENT_MODAL_CALLBACK_ID)
+def on_comment_modal_submit(ack, body, client, view):
+    ack()
+    handle_comment_modal_submit(body, client, view)
 
 
 # ── Flask App ─────────────────────────────────────────────────────────────────

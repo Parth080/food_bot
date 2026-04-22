@@ -83,11 +83,11 @@ def build_poll_blocks(poll_date: str, counts: dict = None) -> list:
                 "type": "mrkdwn",
                 "text": (
                     f"*Live results — {total} vote{'s' if total != 1 else ''}*\n"
-                    f"1: *{counts['1']}*    "
-                    f"2: *{counts['2']}*    "
-                    f"3: *{counts['3']}*    "
-                    f"4: *{counts['4']}*    "
-                    f"5: *{counts['5']}*"
+                    f"😞  1 (Lowest): *{counts['1']}*\n"
+                    f"🙁  2: *{counts['2']}*\n"
+                    f"😐  3: *{counts['3']}*\n"
+                    f"🙂  4: *{counts['4']}*\n"
+                    f"🤩  5 (Highest): *{counts['5']}*"
                 ),
             },
         },

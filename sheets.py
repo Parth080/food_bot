@@ -22,22 +22,22 @@ SUMMARY_SHEET = "Daily Summary"
 
 # Row 1 on each tab — explicit names for Sheets / Excel export
 RAW_HEADERS = [
-    "Date (poll day)",
-    "Time (vote logged)",
-    "Slack user ID",
-    "Voter display name",
-    "Rating (1 to 5)",
-    "Comment (optional, independent of rating)",
+    "Poll Date",
+    "Submitted At",
+    "Slack User ID",
+    "User Name",
+    "Rating (1-5)",
+    "Comment",
 ]
 SUMMARY_HEADERS = [
-    "Date (poll day)",
-    "Rating 1 — vote count",
-    "Rating 2 — vote count",
-    "Rating 3 — vote count",
-    "Rating 4 — vote count",
-    "Rating 5 — vote count",
-    "Total votes",
-    "All comments (name: text, one per line)",
+    "Poll Date",
+    "Rating 1 Count",
+    "Rating 2 Count",
+    "Rating 3 Count",
+    "Rating 4 Count",
+    "Rating 5 Count",
+    "Total Ratings",
+    "Comments (Name: Comment)",
 ]
 
 _SERVICE = None
@@ -247,6 +247,25 @@ def get_user_vote_for_date(poll_date: str, user_id: str) -> str | None:
         return None
     except Exception as e:
         logger.error(f"Unexpected error checking duplicate vote: {e}")
+        return None
+
+
+def get_user_comment_for_date(poll_date: str, user_id: str) -> str | None:
+    """Returns existing non-empty comment for user on poll_date, if any."""
+    try:
+        service = _get_service()
+        rows = _read_raw_votes_rows(service)
+        for row in rows:
+            if len(row) >= 6 and row[0] == poll_date and row[2] == user_id:
+                comment = (row[5] or "").strip()
+                if comment:
+                    return comment
+        return None
+    except HttpError as e:
+        logger.error(f"Google Sheets HttpError checking duplicate comment: {e}")
+        return None
+    except Exception as e:
+        logger.error(f"Unexpected error checking duplicate comment: {e}")
         return None
 
 

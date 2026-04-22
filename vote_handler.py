@@ -7,6 +7,7 @@ from poll import build_poll_blocks
 from sheets import (
     append_vote,
     get_counts_from_raw_votes,
+    get_user_comment_for_date,
     get_user_vote_for_date,
     update_daily_summary,
 )
@@ -28,8 +29,18 @@ def _poll_date_from_action(action: dict) -> str | None:
 
 def open_comment_modal(body: dict, client, action: dict) -> None:
     """Opens a standalone comment modal; comments are independent of rating votes."""
+    user_id = body["user"]["id"]
     poll_date = _poll_date_from_action(action) or str(date.today())
     channel_id = body["container"]["channel_id"]
+    previous_comment = get_user_comment_for_date(poll_date, user_id)
+    if previous_comment:
+        client.chat_postEphemeral(
+            channel=channel_id,
+            user=user_id,
+            text="You already submitted one comment for today. Thanks! 🙏",
+        )
+        logger.info(f"Duplicate comment blocked (modal): {user_id} on {poll_date}")
+        return
     meta = json.dumps(
         {
             "poll_date": poll_date,
@@ -113,6 +124,14 @@ def handle_comment_modal_submit(body: dict, client, view: dict) -> None:
             user=user_id,
             text="Comment was empty, so nothing was saved.",
         )
+        return
+    if get_user_comment_for_date(poll_date, user_id):
+        client.chat_postEphemeral(
+            channel=channel_id,
+            user=user_id,
+            text="You already submitted one comment for today. 🙏",
+        )
+        logger.info(f"Duplicate comment blocked (submit): {user_id} on {poll_date}")
         return
 
     user_name = _get_user_name(client, user_id)

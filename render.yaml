@@ -3,7 +3,9 @@ services:
     name: janta-poll-bot
     runtime: python
     buildCommand: pip install -r requirements.txt
-    startCommand: gunicorn app:flask_app --workers 1 --timeout 90 --bind 0.0.0.0:$PORT
+    # Free tier ~512MB RAM: keep --workers 1 (processes eat RAM; also one in-app cron).
+    # Threads share one process; 8–12 is safer on 512MB, 16 if stable after monitoring.
+    startCommand: gunicorn app:flask_app --workers 1 --worker-class gthread --threads 12 --timeout 90 --bind 0.0.0.0:$PORT
     envVars:
       - key: SLACK_BOT_TOKEN
         sync: false

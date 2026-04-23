@@ -20,6 +20,7 @@ from vote_handler import (
     process_vote,
 )
 from sheets import ensure_sheet_headers
+from poll_scheduler import start_scheduled_polls
 
 # ── Logging ──────────────────────────────────────────────────────────────────
 logging.basicConfig(
@@ -68,6 +69,31 @@ bolt_app = App(
 )
 
 
+def _post_food_poll_message(client, channel_id: str, poll_date: str) -> None:
+    client.chat_postMessage(
+        channel=channel_id,
+        blocks=build_poll_blocks(poll_date),
+        text=f"🍽️ Food poll for {poll_date} — How was the food today?",
+    )
+
+
+def _post_scheduled_poll() -> None:
+    """Cron callback: post today's poll to SLACK_CHANNEL_ID."""
+    channel = CONFIGURED_POLL_CHANNEL_ID
+    if not channel:
+        logger.error("Scheduled poll skipped: SLACK_CHANNEL_ID not set.")
+        return
+    poll_date = str(date.today())
+    try:
+        _post_food_poll_message(bolt_app.client, channel, poll_date)
+        logger.info(f"Scheduled poll posted for {poll_date} → {channel}")
+    except Exception as e:
+        logger.error(f"Scheduled poll failed: {e}")
+
+
+start_scheduled_polls(_post_scheduled_poll, CONFIGURED_POLL_CHANNEL_ID)
+
+
 # ── Slash Command: /startpoll ─────────────────────────────────────────────────
 @bolt_app.command("/startpoll")
 def handle_startpoll(ack, body, client):
@@ -82,11 +108,7 @@ def handle_startpoll(ack, body, client):
     post_channel = CONFIGURED_POLL_CHANNEL_ID or body["channel_id"]
 
     try:
-        client.chat_postMessage(
-            channel=post_channel,
-            blocks=build_poll_blocks(poll_date),
-            text=f"🍽️ Food poll for {poll_date} — How was the food today?",
-        )
+        _post_food_poll_message(client, post_channel, poll_date)
         logger.info(f"Poll posted by {user_id} for {poll_date} → {post_channel}")
 
         _slash_notify_ephemeral(

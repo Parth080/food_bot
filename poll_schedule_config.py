@@ -11,8 +11,9 @@ POLL_TIMEZONE = "Asia/Kolkata"
 # Post the food poll at these local times. Empty list = no cron (only /startpoll).
 # Example: lunch + dinner
 POLL_SCHEDULE_IST = [
-    "11:20",
-    # "19:00",
+    "11:23",
+    "11:24",
+    "11:25",
 ]
 
 # APScheduler day_of_week. None = every day.

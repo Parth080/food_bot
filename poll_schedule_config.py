@@ -12,6 +12,7 @@ POLL_TIMEZONE = "Asia/Kolkata"
 # Example: lunch + dinner
 POLL_SCHEDULE_IST = [
     "14:30",
+    "15:30",
     "20:30"
 ]
 

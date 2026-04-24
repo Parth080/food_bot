@@ -25,3 +25,7 @@ services:
         sync: false
       - key: GOOGLE_SA_CLIENT_ID
         sync: false
+      # Optional memory hygiene knobs (safe defaults if omitted):
+      # MEMORY_HYGIENE_ENABLED=1
+      # MEMORY_CLEANUP_INTERVAL_SECONDS=600
+      # MEMORY_USE_MALLOC_TRIM=1

@@ -1,4 +1,4 @@
-def build_poll_blocks(poll_date: str, counts: dict = None) -> list:
+def build_poll_blocks(poll_slot: str, counts: dict = None) -> list:
     """
     Builds the Slack Block Kit payload for the food poll.
     Optionally includes a live tally section if counts are passed.
@@ -15,7 +15,7 @@ def build_poll_blocks(poll_date: str, counts: dict = None) -> list:
             "type": "header",
             "text": {
                 "type": "plain_text",
-                "text": f"🍽️  Food Rating — {poll_date}",
+                "text": f"🍽️  Food Rating — {poll_slot}",
                 "emoji": True,
             },
         },
@@ -28,7 +28,7 @@ def build_poll_blocks(poll_date: str, counts: dict = None) -> list:
         },
         {
             "type": "actions",
-            "block_id": f"food_poll_{poll_date}",
+            "block_id": f"food_poll_{poll_slot}",
             "elements": [
                 {
                     "type": "button",

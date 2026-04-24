@@ -26,7 +26,7 @@ def _parse_hhmm(s: str) -> tuple[int, int]:
 
 def start_scheduled_polls(post_poll_fn, channel_id: str) -> BackgroundScheduler | None:
     """
-    Registers cron jobs that call post_poll_fn() at configured IST times.
+    Registers cron jobs that call post_poll_fn(slot_time) at configured IST times.
 
     channel_id must be set (SLACK_CHANNEL_ID); scheduled posts have no slash-command channel.
     """
@@ -55,6 +55,7 @@ def start_scheduled_polls(post_poll_fn, channel_id: str) -> BackgroundScheduler 
         scheduler.add_job(
             post_poll_fn,
             CronTrigger(**trig_kw),
+            args=[f"{hour:02d}:{minute:02d}"],
             id=f"food_poll_{hour:02d}{minute:02d}_{i}",
             replace_existing=True,
         )

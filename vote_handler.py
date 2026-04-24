@@ -1,7 +1,7 @@
 import json
 import logging
-import os
-from datetime import date
+from datetime import datetime
+from zoneinfo import ZoneInfo
 
 from poll import build_poll_blocks
 from sheets import (
@@ -11,6 +11,7 @@ from sheets import (
     get_user_vote_for_date,
     update_daily_summary,
 )
+from poll_schedule_config import POLL_TIMEZONE
 
 logger = logging.getLogger(__name__)
 
@@ -18,8 +19,12 @@ logger = logging.getLogger(__name__)
 COMMENT_MODAL_CALLBACK_ID = "comment_modal"
 
 
-def _poll_date_from_action(action: dict) -> str | None:
-    """Poll messages use block_id `food_poll_{YYYY-MM-DD}` on the actions block."""
+def _current_poll_slot() -> str:
+    return datetime.now(ZoneInfo(POLL_TIMEZONE)).strftime("%Y-%m-%d %H:%M")
+
+
+def _poll_slot_from_action(action: dict) -> str | None:
+    """Poll messages use block_id `food_poll_{YYYY-MM-DD HH:MM}` on the actions block."""
     bid = action.get("block_id") or ""
     prefix = "food_poll_"
     if bid.startswith(prefix):
@@ -30,20 +35,20 @@ def _poll_date_from_action(action: dict) -> str | None:
 def open_comment_modal(body: dict, client, action: dict) -> None:
     """Opens a standalone comment modal; comments are independent of rating votes."""
     user_id = body["user"]["id"]
-    poll_date = _poll_date_from_action(action) or str(date.today())
+    poll_slot = _poll_slot_from_action(action) or _current_poll_slot()
     channel_id = body["container"]["channel_id"]
-    previous_comment = get_user_comment_for_date(poll_date, user_id)
+    previous_comment = get_user_comment_for_date(poll_slot, user_id)
     if previous_comment:
         client.chat_postEphemeral(
             channel=channel_id,
             user=user_id,
-            text="You already submitted one comment for today. Thanks! 🙏",
+            text="You already submitted one comment for this poll. Thanks! 🙏",
         )
-        logger.info(f"Duplicate comment blocked (modal): {user_id} on {poll_date}")
+        logger.info(f"Duplicate comment blocked (modal): {user_id} on {poll_slot}")
         return
     meta = json.dumps(
         {
-            "poll_date": poll_date,
+            "poll_date": poll_slot,
             "channel_id": channel_id,
             "message_ts": body["container"]["message_ts"],
         }
@@ -104,7 +109,7 @@ def handle_comment_modal_submit(body: dict, client, view: dict) -> None:
         logger.error("Invalid modal private_metadata")
         return
 
-    poll_date = meta.get("poll_date") or str(date.today())
+    poll_date = meta.get("poll_date") or _current_poll_slot()
     channel_id = meta.get("channel_id")
     message_ts = meta.get("message_ts")
     if not channel_id or not message_ts:
@@ -129,7 +134,7 @@ def handle_comment_modal_submit(body: dict, client, view: dict) -> None:
         client.chat_postEphemeral(
             channel=channel_id,
             user=user_id,
-            text="You already submitted one comment for today. 🙏",
+            text="You already submitted one comment for this poll. 🙏",
         )
         logger.info(f"Duplicate comment blocked (submit): {user_id} on {poll_date}")
         return
@@ -159,7 +164,7 @@ def process_vote(
     """
     user_id = body["user"]["id"]
     choice = action["value"]  # "1" | "2" | "3" | "4" | "5"
-    poll_date = poll_date or _poll_date_from_action(action) or str(date.today())
+    poll_date = poll_date or _poll_slot_from_action(action) or _current_poll_slot()
     channel_id = body["container"]["channel_id"]
     message_ts = body["container"]["message_ts"]
 
@@ -169,7 +174,7 @@ def process_vote(
         client.chat_postEphemeral(
             channel=channel_id,
             user=user_id,
-            text=f"You already voted *{_label(previous)}* today. Votes are final — thanks! 🙏",
+            text=f"You already voted *{_label(previous)}* for this poll. Votes are final — thanks! 🙏",
         )
         logger.info(f"Duplicate vote blocked: {user_id} already voted {previous}")
         return

@@ -3,7 +3,8 @@ import logging
 import os
 import urllib.error
 import urllib.request
-from datetime import date
+from datetime import datetime
+from zoneinfo import ZoneInfo
 
 from dotenv import load_dotenv
 load_dotenv()
@@ -21,6 +22,8 @@ from vote_handler import (
 )
 from sheets import ensure_sheet_headers
 from poll_scheduler import start_scheduled_polls
+from poll_schedule_config import POLL_TIMEZONE
+from memory_hygiene import start_memory_hygiene
 
 # ── Logging ──────────────────────────────────────────────────────────────────
 logging.basicConfig(
@@ -28,6 +31,7 @@ logging.basicConfig(
     format="%(asctime)s [%(levelname)s] %(name)s — %(message)s",
 )
 logger = logging.getLogger(__name__)
+start_memory_hygiene()
 
 # If set, poll is posted here; if empty, posts in the channel where /startpoll was run.
 CONFIGURED_POLL_CHANNEL_ID = (os.environ.get("SLACK_CHANNEL_ID") or "").strip()
@@ -69,24 +73,31 @@ bolt_app = App(
 )
 
 
-def _post_food_poll_message(client, channel_id: str, poll_date: str) -> None:
+def _post_food_poll_message(client, channel_id: str, poll_slot: str) -> None:
     client.chat_postMessage(
         channel=channel_id,
-        blocks=build_poll_blocks(poll_date),
-        text=f"🍽️ Food poll for {poll_date} — How was the food today?",
+        blocks=build_poll_blocks(poll_slot),
+        text=f"🍽️ Food poll for {poll_slot} — How was the food today?",
     )
 
 
-def _post_scheduled_poll() -> None:
+def _build_poll_slot(slot_time: str | None = None) -> str:
+    now = datetime.now(ZoneInfo(POLL_TIMEZONE))
+    if slot_time:
+        return f"{now.date()} {slot_time}"
+    return now.strftime("%Y-%m-%d %H:%M")
+
+
+def _post_scheduled_poll(slot_time: str | None = None) -> None:
     """Cron callback: post today's poll to SLACK_CHANNEL_ID."""
     channel = CONFIGURED_POLL_CHANNEL_ID
     if not channel:
         logger.error("Scheduled poll skipped: SLACK_CHANNEL_ID not set.")
         return
-    poll_date = str(date.today())
+    poll_slot = _build_poll_slot(slot_time)
     try:
-        _post_food_poll_message(bolt_app.client, channel, poll_date)
-        logger.info(f"Scheduled poll posted for {poll_date} → {channel}")
+        _post_food_poll_message(bolt_app.client, channel, poll_slot)
+        logger.info(f"Scheduled poll posted for {poll_slot} → {channel}")
     except Exception as e:
         logger.error(f"Scheduled poll failed: {e}")
 
@@ -103,19 +114,19 @@ def handle_startpoll(ack, body, client):
     """
     ack()
 
-    poll_date = str(date.today())
+    poll_slot = _build_poll_slot()
     user_id = body["user_id"]
     post_channel = CONFIGURED_POLL_CHANNEL_ID or body["channel_id"]
 
     try:
-        _post_food_poll_message(client, post_channel, poll_date)
-        logger.info(f"Poll posted by {user_id} for {poll_date} → {post_channel}")
+        _post_food_poll_message(client, post_channel, poll_slot)
+        logger.info(f"Poll posted by {user_id} for {poll_slot} → {post_channel}")
 
         _slash_notify_ephemeral(
             body,
             client,
             user_id,
-            text=f"✅ Poll posted to <#{post_channel}> for *{poll_date}*!",
+            text=f"✅ Poll posted to <#{post_channel}> for *{poll_slot}*!",
         )
     except Exception as e:
         logger.error(f"Failed to post poll: {e}")

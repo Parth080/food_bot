@@ -22,7 +22,7 @@ SUMMARY_SHEET = "Daily Summary"
 
 # Row 1 on each tab — explicit names for Sheets / Excel export
 RAW_HEADERS = [
-    "Poll Date",
+    "Poll Slot (Date Time)",
     "Submitted At",
     "Slack User ID",
     "User Name",
@@ -30,7 +30,7 @@ RAW_HEADERS = [
     "Comment",
 ]
 SUMMARY_HEADERS = [
-    "Poll Date",
+    "Poll Slot (Date Time)",
     "Rating 1 Count",
     "Rating 2 Count",
     "Rating 3 Count",

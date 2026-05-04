@@ -4,6 +4,7 @@ import json
 import logging
 import os
 import re
+import threading
 import urllib.parse
 from datetime import datetime
 from zoneinfo import ZoneInfo
@@ -44,6 +45,11 @@ SUMMARY_HEADERS = [
 ]
 
 _SERVICE = None
+
+# Caches {poll_slot: 1-indexed sheet row} so update_daily_summary skips the A:A column read.
+# Cleared after reorganize (which renumbers rows) — happens only on new slot creation (~2×/day).
+_summary_row_cache: dict[str, int] = {}
+_summary_cache_lock = threading.Lock()
 
 # Visual grouping in Raw Votes / Daily Summary (column A). Never matches real poll_slot keys.
 _SECTION_DAY_PREFIX = "SECTION:day:"
@@ -302,8 +308,13 @@ def _read_raw_votes_rows(service) -> list[list[str]]:
     return result.get("values", [])
 
 
+def read_raw_votes_rows() -> list[list[str]]:
+    """Public helper: fetch all raw vote rows once so callers can pass them to multiple functions."""
+    return _read_raw_votes_rows(_get_service())
+
+
 def get_user_vote_for_date(
-    poll_date: str, user_id: str, message_ts: str | None = None
+    poll_date: str, user_id: str, message_ts: str | None = None, _rows: list | None = None
 ) -> str | None:
     """
     Returns existing rating (1..5) for this user on this poll.
@@ -314,7 +325,7 @@ def get_user_vote_for_date(
     """
     try:
         service = _get_service()
-        rows = _read_raw_votes_rows(service)
+        rows = _rows if _rows is not None else _read_raw_votes_rows(service)
         ts = (message_ts or "").strip()
 
         if ts:
@@ -351,12 +362,12 @@ def get_user_vote_for_date(
 
 
 def get_user_comment_for_date(
-    poll_date: str, user_id: str, message_ts: str | None = None
+    poll_date: str, user_id: str, message_ts: str | None = None, _rows: list | None = None
 ) -> str | None:
     """Returns existing non-empty comment for user on this poll (same rules as vote dedupe)."""
     try:
         service = _get_service()
-        rows = _read_raw_votes_rows(service)
+        rows = _rows if _rows is not None else _read_raw_votes_rows(service)
         ts = (message_ts or "").strip()
 
         if ts:
@@ -398,12 +409,12 @@ def get_user_comment_for_date(
         return None
 
 
-def get_counts_from_raw_votes(poll_date: str) -> dict:
+def get_counts_from_raw_votes(poll_date: str, _rows: list | None = None) -> dict:
     """Computes rating 1..5 counts for poll_date from Raw Votes rows."""
     counts = {"1": 0, "2": 0, "3": 0, "4": 0, "5": 0}
     try:
         service = _get_service()
-        rows = _read_raw_votes_rows(service)
+        rows = _rows if _rows is not None else _read_raw_votes_rows(service)
         for row in rows:
             if not _is_poll_slot_key(row[0] if row else ""):
                 continue
@@ -421,12 +432,12 @@ def get_counts_from_raw_votes(poll_date: str) -> dict:
         return counts
 
 
-def _aggregate_comments_for_date(service, poll_date: str) -> str:
+def _aggregate_comments_for_date(service, poll_date: str, _rows: list | None = None) -> str:
     """
     Reads Raw Votes for poll_date and builds newline-separated "Name: comment" lines
     for all rows with non-empty comments.
     """
-    rows = _read_raw_votes_rows(service)
+    rows = _rows if _rows is not None else _read_raw_votes_rows(service)
     lines: list[str] = []
 
     for row in rows:
@@ -494,6 +505,7 @@ def append_vote(
     choice: str,
     remark: str = "",
     message_ts: str = "",
+    _rows: list | None = None,
 ):
     """
     Appends one row to the Raw Votes tab immediately after a vote is cast.
@@ -506,7 +518,7 @@ def append_vote(
         remark_cell = (remark or "").strip()
         ts_cell = (message_ts or "").strip()
 
-        existing = _read_raw_votes_rows(service)
+        existing = _rows if _rows is not None else _read_raw_votes_rows(service)
         section_rows = _section_rows_before_vote(poll_date, existing)
         new_rows = section_rows + [
             [poll_date, now, user_id, user_name, choice, remark_cell, ts_cell]
@@ -528,32 +540,36 @@ def append_vote(
         logger.error(f"Unexpected error appending vote: {e}")
 
 
-def update_daily_summary(poll_date: str, counts: dict):
+def update_daily_summary(poll_date: str, counts: dict, _rows: list | None = None):
     """
     Upserts a row in the Daily Summary tab for the given date.
     If a row for today exists, it updates it. Otherwise appends a new row.
+    Reorganize is skipped for existing slots (row order unchanged) — only runs on new slot creation.
     """
     try:
         service = _get_service()
         sheet = service.spreadsheets()
 
-        # Read all existing dates in the summary tab
-        result = (
-            sheet.values()
-            .get(spreadsheetId=SPREADSHEET_ID, range=f"{SUMMARY_SHEET}!A:A")
-            .execute()
-        )
-        existing_dates = result.get("values", [])
+        # Check in-process cache before issuing a Sheets API read.
+        with _summary_cache_lock:
+            target_row: int | None = _summary_row_cache.get(poll_date)
 
-        # Find if today's date already has a row (1-indexed, row 1 is header)
-        target_row = None
-        for i, row in enumerate(existing_dates):
-            if row and row[0] == poll_date:
-                target_row = i + 1  # 1-indexed sheet row
-                break
+        if target_row is None:
+            result = (
+                sheet.values()
+                .get(spreadsheetId=SPREADSHEET_ID, range=f"{SUMMARY_SHEET}!A:A")
+                .execute()
+            )
+            existing_dates = result.get("values", [])
+            for i, row in enumerate(existing_dates):
+                if row and row[0] == poll_date:
+                    target_row = i + 1  # 1-indexed sheet row
+                    with _summary_cache_lock:
+                        _summary_row_cache[poll_date] = target_row
+                    break
 
         total = sum(counts.values())
-        all_comments = _aggregate_comments_for_date(service, poll_date)
+        all_comments = _aggregate_comments_for_date(service, poll_date, _rows=_rows)
         row_data = [
             poll_date,
             counts.get("1", 0),
@@ -566,15 +582,15 @@ def update_daily_summary(poll_date: str, counts: dict):
         ]
 
         if target_row:
-            # Update existing row
             sheet.values().update(
                 spreadsheetId=SPREADSHEET_ID,
                 range=f"{SUMMARY_SHEET}!A{target_row}:H{target_row}",
                 valueInputOption="RAW",
                 body={"values": [row_data]},
             ).execute()
+            logger.info(f"Updated daily summary for {poll_date}: {counts}")
         else:
-            # Append new row
+            # New poll slot — append then reorganize for grouping/ordering.
             sheet.values().append(
                 spreadsheetId=SPREADSHEET_ID,
                 range=f"{SUMMARY_SHEET}!A:H",
@@ -582,15 +598,16 @@ def update_daily_summary(poll_date: str, counts: dict):
                 insertDataOption="INSERT_ROWS",
                 body={"values": [row_data]},
             ).execute()
-
-        logger.info(f"Updated daily summary for {poll_date}: {counts}")
-
-        try:
-            _reorganize_daily_summary(service)
-        except HttpError as e:
-            logger.warning(f"Daily summary reorganize HttpError (data still saved): {e}")
-        except Exception as e:
-            logger.warning(f"Daily summary reorganize failed (data still saved): {e}")
+            logger.info(f"Appended new summary slot for {poll_date}: {counts}")
+            try:
+                _reorganize_daily_summary(service)
+                # Reorganize renumbers every row — flush the entire cache.
+                with _summary_cache_lock:
+                    _summary_row_cache.clear()
+            except HttpError as e:
+                logger.warning(f"Daily summary reorganize HttpError (data still saved): {e}")
+            except Exception as e:
+                logger.warning(f"Daily summary reorganize failed (data still saved): {e}")
 
     except HttpError as e:
         logger.error(f"Google Sheets HttpError updating summary: {e}")

@@ -1,30 +1,28 @@
 #!/usr/bin/env python3
 """
-Fire many concurrent synthetic Slack block_actions (vote button) requests against your bot.
+End-to-end load test: **Slack → your server → Sheets → Slack UI**.
 
-This exercises the *real* Flask/Bolt handlers (same path as production), so:
-  - Google Sheets writes run
-  - chat_update should refresh the poll message in Slack (live counts), if SLACK_BOT_TOKEN works
+**Default flow (`--post-live-poll`, on by default)**  
+1. `SLACK_BOT_TOKEN` — `chat.postMessage` posts a **real** poll in the channel (same blocks as production).  
+2. `SLACK_SIGNING_SECRET` — signed HTTP POSTs to your Render app simulate button clicks.  
+3. Server runs Bolt → `process_vote` → Google Sheets + `chat.update` on that **same** message `ts`.
 
-Requirements:
-  - SLACK_SIGNING_SECRET in env (same as the running app)
-  - A real poll message: channel ID, message ts, and poll_slot string exactly as in the message header
-    (e.g. food_poll_2026-05-04 14:30 -> poll_slot "2026-05-04 14:30")
+That way `message_ts`, `block_id`, and channel match what Slack expects, so live counts should update
+in-channel (not only the sheet).
+
+**`--no-post-live-poll`** — Skip step 1; use `--message-ts` / `--poll-slot` / env / hardcoded defaults
+(useful if the message no longer exists or `ts`/slot drift → `chat.update` often fails).
+
+**Required in `.env`:** `SLACK_SIGNING_SECRET`; for default flow also `SLACK_BOT_TOKEN`.
+
+**Precedence for URL/channel/ts/slot:** CLI → env → `DEFAULT_*` constants.
 
 Usage:
-  export SLACK_SIGNING_SECRET=xoxb-...
-  python scripts/load_test_votes.py \\
-    --base-url https://your-service.onrender.com \\
-    --channel-id C0123456789 \\
-    --message-ts 1234567890.123456 \\
-    --poll-slot "2026-05-04 14:30"
+  python scripts/load_test_votes.py
+  python scripts/load_test_votes.py --count 500 --workers 100
+  python scripts/load_test_votes.py --no-post-live-poll --message-ts ... --poll-slot "..."
 
-Optional:
-  --path /slack/events   (default tries /slack/events then /)
-  --count 500
-  --workers 100          (thread pool size; requests still total --count)
-
-Warning: This writes to your real sheet and spams Slack API. Use a test workspace/channel only.
+Warning: Writes to your real sheet and spams Slack + your app.
 """
 
 from __future__ import annotations
@@ -35,11 +33,34 @@ import hmac
 import json
 import os
 import random
+import sys
 import time
 import urllib.error
 import urllib.parse
 import urllib.request
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from pathlib import Path
+
+from dotenv import load_dotenv
+
+# ── Hardcoded targets (override via .env or CLI when you run a new poll) ─────────
+DEFAULT_BASE_URL = "https://food-bot-flam.onrender.com"
+DEFAULT_SLACK_REQUEST_PATH = "/slack/events"
+DEFAULT_POLL_CHANNEL_ID = "C0ARC31G2HM"
+# From permalink …/p1777886496848499 → ts = 1777886496.848499
+DEFAULT_POLL_MESSAGE_TS = "1777886496.848499"
+DEFAULT_POLL_SLOT = "2026-05-04 14:51"
+
+
+def _load_dotenv_from_repo() -> Path:
+    """Load `.env` from repo root (parent of `scripts/`)."""
+    repo_root = Path(__file__).resolve().parent.parent
+    env_path = repo_root / ".env"
+    if env_path.is_file():
+        load_dotenv(env_path)
+    else:
+        load_dotenv()
+    return repo_root
 
 
 def _sign_request(signing_secret: str, timestamp: str, raw_body: str) -> str:
@@ -128,40 +149,172 @@ def _post_one(
         return -1, str(e.reason if hasattr(e, "reason") else e)
 
 
+def _resolve_endpoint(
+    cli_base: str | None,
+    cli_path: str | None,
+) -> tuple[str, str]:
+    base = (cli_base or "").strip().rstrip("/")
+    if not base:
+        base = (os.environ.get("LOAD_TEST_BASE_URL") or "").strip().rstrip("/")
+    if not base:
+        base = DEFAULT_BASE_URL.rstrip("/")
+
+    path = (cli_path or "").strip()
+    if not path:
+        path = (os.environ.get("LOAD_TEST_PATH") or "").strip()
+    if not path:
+        path = DEFAULT_SLACK_REQUEST_PATH
+    if not path.startswith("/"):
+        path = "/" + path
+    return base, path
+
+
+def _resolve_channel_id(cli_ch: str | None) -> str:
+    channel_id = (cli_ch or "").strip()
+    if not channel_id:
+        channel_id = (
+            os.environ.get("LOAD_TEST_CHANNEL_ID")
+            or os.environ.get("SLACK_CHANNEL_ID")
+            or ""
+        ).strip()
+    if not channel_id:
+        channel_id = DEFAULT_POLL_CHANNEL_ID
+    return channel_id
+
+
+def _post_live_poll_via_slack(repo_root: Path, channel_id: str) -> tuple[str, str, str]:
+    """
+    Post a real poll message with the bot token. Returns (message_ts, poll_slot, team_id)
+    for building synthetic block_actions (team_id from auth.test).
+    """
+    bot = (os.environ.get("SLACK_BOT_TOKEN") or "").strip()
+    if not bot:
+        raise ValueError(
+            "SLACK_BOT_TOKEN is required to post a live poll (or pass --no-post-live-poll)"
+        )
+
+    sys.path.insert(0, str(repo_root))
+    from datetime import datetime
+    from zoneinfo import ZoneInfo
+
+    from poll import build_poll_blocks
+    from poll_schedule_config import POLL_TIMEZONE
+    from slack_sdk import WebClient
+
+    client = WebClient(token=bot)
+    auth = client.auth_test()
+    if not auth.get("ok"):
+        raise RuntimeError(f"Slack auth.test failed: {auth}")
+    team_id = (auth.get("team_id") or "T00000000").strip()
+
+    poll_slot = datetime.now(ZoneInfo(POLL_TIMEZONE)).strftime("%Y-%m-%d %H:%M")
+    resp = client.chat_postMessage(
+        channel=channel_id,
+        blocks=build_poll_blocks(poll_slot),
+        text=f"🍽️ Food poll for {poll_slot} — load test",
+    )
+    if not resp.get("ok"):
+        raise RuntimeError(f"chat.postMessage failed: {resp}")
+
+    return str(resp["ts"]), poll_slot, team_id
+
+
+def _resolve_poll_target(
+    cli_ch: str | None,
+    cli_ts: str | None,
+    cli_slot: str | None,
+) -> tuple[str, str, str]:
+    channel_id = _resolve_channel_id(cli_ch)
+
+    message_ts = (cli_ts or "").strip()
+    if not message_ts:
+        message_ts = (os.environ.get("LOAD_TEST_MESSAGE_TS") or "").strip()
+    if not message_ts:
+        message_ts = DEFAULT_POLL_MESSAGE_TS
+
+    poll_slot = (cli_slot or "").strip()
+    if not poll_slot:
+        poll_slot = (os.environ.get("LOAD_TEST_POLL_SLOT") or "").strip()
+    if not poll_slot:
+        poll_slot = DEFAULT_POLL_SLOT
+
+    return channel_id, message_ts, poll_slot
+
+
 def main() -> None:
+    repo_root = _load_dotenv_from_repo()
     p = argparse.ArgumentParser(description="Load-test food poll vote endpoint with signed Slack payloads.")
     p.add_argument(
         "--base-url",
-        default=os.environ.get("LOAD_TEST_BASE_URL", "").rstrip("/"),
-        help="e.g. https://your-bot.onrender.com (no trailing slash)",
+        default=None,
+        help=f"Default: env LOAD_TEST_BASE_URL or {DEFAULT_BASE_URL!r}",
     )
-    p.add_argument("--path", default=os.environ.get("LOAD_TEST_PATH", "/slack/events"))
-    p.add_argument("--channel-id", required=True, help="Channel containing the poll (C…)")
-    p.add_argument("--message-ts", required=True, help="Poll message ts (copy from Slack)")
+    p.add_argument(
+        "--path",
+        default=None,
+        help=f"Default: env LOAD_TEST_PATH or {DEFAULT_SLACK_REQUEST_PATH!r}",
+    )
+    p.add_argument(
+        "--channel-id",
+        default=None,
+        help=f"Default: env SLACK_CHANNEL_ID / LOAD_TEST_CHANNEL_ID or {DEFAULT_POLL_CHANNEL_ID!r}",
+    )
+    p.add_argument(
+        "--message-ts",
+        default=None,
+        help="Default: env LOAD_TEST_MESSAGE_TS or hardcoded ts for the Flam test poll",
+    )
     p.add_argument(
         "--poll-slot",
-        required=True,
-        help='Exact poll slot string from the message, e.g. "2026-05-04 14:30"',
+        default=None,
+        help='Default: env LOAD_TEST_POLL_SLOT or hardcoded slot for the Flam test poll',
     )
-    p.add_argument("--count", type=int, default=500)
-    p.add_argument("--workers", type=int, default=100)
+    p.add_argument("--count", type=int, default=50)
+    p.add_argument("--workers", type=int, default=25)
     p.add_argument("--timeout", type=float, default=90.0)
     p.add_argument("--seed", type=int, default=None, help="RNG seed for reproducible vote distribution")
+    p.set_defaults(post_live_poll=True)
+    p.add_argument(
+        "--no-post-live-poll",
+        dest="post_live_poll",
+        action="store_false",
+        help="Skip chat.postMessage; reuse --message-ts / env / defaults (often sheet-only updates).",
+    )
     args = p.parse_args()
 
-    if not args.base_url:
-        p.error("Pass --base-url or set LOAD_TEST_BASE_URL")
+    base_url, path = _resolve_endpoint(args.base_url, args.path)
+
     signing_secret = (os.environ.get("SLACK_SIGNING_SECRET") or "").strip()
     if not signing_secret:
-        p.error("Set SLACK_SIGNING_SECRET in the environment")
+        p.error(f"Set SLACK_SIGNING_SECRET in {repo_root / '.env'} (or export it)")
 
-    team_id = (os.environ.get("SLACK_TEAM_ID") or "T00000000").strip()
     api_app_id = (os.environ.get("SLACK_APP_ID") or "A00000000").strip()
+    team_id = (os.environ.get("SLACK_TEAM_ID") or "T00000000").strip()
+
+    use_live_post = args.post_live_poll
+    if use_live_post:
+        channel_id = _resolve_channel_id(args.channel_id)
+        try:
+            message_ts, poll_slot, team_id = _post_live_poll_via_slack(repo_root, channel_id)
+        except Exception as e:
+            p.error(f"Live Slack poll post failed: {e}")
+        print(
+            "\n=== Step 1: Posted live poll to Slack ===\n"
+            f"  channel={channel_id}\n"
+            f"  message_ts={message_ts}\n"
+            f"  poll_slot={poll_slot!r}\n"
+        )
+        time.sleep(1.5)
+    else:
+        channel_id, message_ts, poll_slot = _resolve_poll_target(
+            args.channel_id, args.message_ts, args.poll_slot
+        )
+        print("\n=== Step 1: Skipped live post (reuse message) ===\n")
 
     if args.seed is not None:
         random.seed(args.seed)
 
-    url = f"{args.base_url}{args.path}"
+    url = f"{base_url}{path}"
     votes = ["1", "2", "3", "4", "5"]
 
     jobs: list[dict] = []
@@ -170,9 +323,9 @@ def main() -> None:
         v = random.choice(votes)
         jobs.append(
             _build_block_actions_payload(
-                channel_id=args.channel_id,
-                message_ts=args.message_ts,
-                poll_slot=args.poll_slot,
+                channel_id=channel_id,
+                message_ts=message_ts,
+                poll_slot=poll_slot,
                 user_id=uid,
                 vote=v,
                 team_id=team_id,
@@ -180,8 +333,12 @@ def main() -> None:
             )
         )
 
-    print(f"POST {url}  x{args.count}  workers={args.workers}  timeout={args.timeout}s")
-    print(f"poll_slot={args.poll_slot!r}  block_id=food_poll_{args.poll_slot}")
+    print(
+        f"=== Step 2: Signed block_actions → {url}  "
+        f"x{args.count}  workers={args.workers}  timeout={args.timeout}s ==="
+    )
+    print(f"channel={channel_id}  message_ts={message_ts}")
+    print(f"poll_slot={poll_slot!r}  block_id=food_poll_{poll_slot}")
 
     status_counts: dict[int, int] = {}
     errors: list[str] = []
@@ -210,8 +367,9 @@ def main() -> None:
             print(f"  {line}")
 
     print(
-        "\nSlack UI: open the poll message — the last successful chat_update wins; "
-        "counts should reflect votes that made it through Sheets + Slack API limits."
+        "\n=== Done ===\n"
+        "Open the poll message in Slack — counts should match sheet rows for this message_ts. "
+        "If you skipped live post, parent chat.update may fail; use default flow for full UI updates."
     )
 
 

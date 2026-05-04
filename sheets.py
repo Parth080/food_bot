@@ -3,6 +3,7 @@ import binascii
 import json
 import logging
 import os
+import re
 import urllib.parse
 from datetime import datetime
 from zoneinfo import ZoneInfo
@@ -28,7 +29,9 @@ RAW_HEADERS = [
     "User Name",
     "Rating (1-5)",
     "Comment",
+    "Message TS",
 ]
+_RATINGS = frozenset({"1", "2", "3", "4", "5"})
 SUMMARY_HEADERS = [
     "Poll Slot (Date Time)",
     "Rating 1 Count",
@@ -41,6 +44,72 @@ SUMMARY_HEADERS = [
 ]
 
 _SERVICE = None
+
+# Visual grouping in Raw Votes / Daily Summary (column A). Never matches real poll_slot keys.
+_SECTION_DAY_PREFIX = "SECTION:day:"
+_SECTION_SLOT_PREFIX = "SECTION:slot:"
+
+_POLL_SLOT_KEY_RE = re.compile(r"^\d{4}-\d{2}-\d{2}(\s+\d{2}:\d{2})?$")
+
+
+def _is_poll_slot_key(cell: str) -> bool:
+    """True if column A holds a real poll slot / legacy date key (not a section label)."""
+    s = (cell or "").strip()
+    if not s or s.startswith("SECTION:"):
+        return False
+    return bool(_POLL_SLOT_KEY_RE.match(s))
+
+
+def _date_part_from_slot(slot: str) -> str:
+    """Calendar day YYYY-MM-DD from a poll slot or date string."""
+    s = (slot or "").strip()
+    return s[:10] if len(s) >= 10 else ""
+
+
+def _last_poll_slot_in_raw_rows(rows: list[list[str]]) -> str | None:
+    """Last row's poll key in column A (skips section/spacer rows)."""
+    for row in reversed(rows):
+        if not row:
+            continue
+        if _is_poll_slot_key(row[0]):
+            return (row[0] or "").strip()
+    return None
+
+
+def _section_rows_before_vote(poll_slot: str, rows: list[list[str]]) -> list[list[str]]:
+    """
+    Insert day + slot banners when the calendar day or poll slot changes.
+    First-ever row gets day + slot headers so the sheet stays grouped.
+    """
+    day = _date_part_from_slot(poll_slot)
+    if not day:
+        return []
+
+    last_slot = _last_poll_slot_in_raw_rows(rows)
+    last_day = _date_part_from_slot(last_slot) if last_slot else None
+
+    # Avoid duplicate slot banner if two appends race and both see the same "last" state.
+    last_row = rows[-1] if rows else []
+    if (
+        last_row
+        and (last_row[0] or "").strip() == f"{_SECTION_SLOT_PREFIX}{poll_slot}"
+    ):
+        return []
+
+    empty7 = ["", "", "", "", "", "", ""]
+    out: list[list[str]] = []
+    if last_slot is None:
+        out.append([f"{_SECTION_DAY_PREFIX}{day}", *empty7[1:]])
+        out.append([f"{_SECTION_SLOT_PREFIX}{poll_slot}", *empty7[1:]])
+        return out
+
+    if day != last_day:
+        out.append([f"{_SECTION_DAY_PREFIX}{day}", *empty7[1:]])
+        out.append([f"{_SECTION_SLOT_PREFIX}{poll_slot}", *empty7[1:]])
+    elif last_slot != poll_slot:
+        out.append([f"{_SECTION_SLOT_PREFIX}{poll_slot}", *empty7[1:]])
+
+    return out
 
 
 def _normalize_private_key(pem: str) -> str:
@@ -166,10 +235,10 @@ def ensure_sheet_headers():
         service = _get_service()
         sheet = service.spreadsheets()
 
-        # Raw Votes: ensure Date … Remarks (6 columns)
+        # Raw Votes: through Message TS (7 columns)
         result = (
             sheet.values()
-            .get(spreadsheetId=SPREADSHEET_ID, range=f"{RAW_SHEET}!A1:F1")
+            .get(spreadsheetId=SPREADSHEET_ID, range=f"{RAW_SHEET}!A1:G1")
             .execute()
         )
         row = (result.get("values") or [[]])[0]
@@ -177,7 +246,7 @@ def ensure_sheet_headers():
         if not row:
             sheet.values().update(
                 spreadsheetId=SPREADSHEET_ID,
-                range=f"{RAW_SHEET}!A1:F1",
+                range=f"{RAW_SHEET}!A1:G1",
                 valueInputOption="RAW",
                 body={"values": [RAW_HEADERS]},
             ).execute()
@@ -185,11 +254,11 @@ def ensure_sheet_headers():
         elif len(row) < len(RAW_HEADERS) or row[: len(RAW_HEADERS)] != RAW_HEADERS:
             sheet.values().update(
                 spreadsheetId=SPREADSHEET_ID,
-                range=f"{RAW_SHEET}!A1:F1",
+                range=f"{RAW_SHEET}!A1:G1",
                 valueInputOption="RAW",
                 body={"values": [RAW_HEADERS]},
             ).execute()
-            logger.info("Updated Raw Votes header row (added Remarks / normalized)")
+            logger.info("Updated Raw Votes header row (Message TS / normalized)")
 
         # Daily Summary: rating counts + aggregated comment column (8 columns)
         result2 = (
@@ -227,19 +296,50 @@ def _read_raw_votes_rows(service) -> list[list[str]]:
     result = (
         service.spreadsheets()
         .values()
-        .get(spreadsheetId=SPREADSHEET_ID, range=f"{RAW_SHEET}!A2:F")
+        .get(spreadsheetId=SPREADSHEET_ID, range=f"{RAW_SHEET}!A2:G")
         .execute()
     )
     return result.get("values", [])
 
 
-def get_user_vote_for_date(poll_date: str, user_id: str) -> str | None:
-    """Returns existing rating (1..5) for user on poll_date, if any."""
+def get_user_vote_for_date(
+    poll_date: str, user_id: str, message_ts: str | None = None
+) -> str | None:
+    """
+    Returns existing rating (1..5) for this user on this poll.
+
+    When message_ts is set (Slack parent message ts), that is the primary dedupe key so
+    a second click cannot slip through if poll_slot parsing ever differs. Legacy rows
+    without Message TS still match on poll_slot + user.
+    """
     try:
         service = _get_service()
         rows = _read_raw_votes_rows(service)
+        ts = (message_ts or "").strip()
+
+        if ts:
+            for row in rows:
+                if len(row) < 5 or row[2] != user_id or row[4] not in _RATINGS:
+                    continue
+                row_ts = (row[6] if len(row) > 6 else "").strip()
+                if row_ts == ts:
+                    return row[4]
+            for row in rows:
+                if not _is_poll_slot_key(row[0] if row else ""):
+                    continue
+                if len(row) < 5 or row[0] != poll_date or row[2] != user_id:
+                    continue
+                if row[4] not in _RATINGS:
+                    continue
+                row_ts = (row[6] if len(row) > 6 else "").strip()
+                if not row_ts:
+                    return row[4]
+            return None
+
         for row in rows:
-            if len(row) >= 5 and row[0] == poll_date and row[2] == user_id and row[4] in {"1", "2", "3", "4", "5"}:
+            if not _is_poll_slot_key(row[0] if row else ""):
+                continue
+            if len(row) >= 5 and row[0] == poll_date and row[2] == user_id and row[4] in _RATINGS:
                 return row[4]
         return None
     except HttpError as e:
@@ -250,12 +350,41 @@ def get_user_vote_for_date(poll_date: str, user_id: str) -> str | None:
         return None
 
 
-def get_user_comment_for_date(poll_date: str, user_id: str) -> str | None:
-    """Returns existing non-empty comment for user on poll_date, if any."""
+def get_user_comment_for_date(
+    poll_date: str, user_id: str, message_ts: str | None = None
+) -> str | None:
+    """Returns existing non-empty comment for user on this poll (same rules as vote dedupe)."""
     try:
         service = _get_service()
         rows = _read_raw_votes_rows(service)
+        ts = (message_ts or "").strip()
+
+        if ts:
+            for row in rows:
+                if len(row) < 6 or row[2] != user_id:
+                    continue
+                comment = (row[5] or "").strip()
+                if not comment:
+                    continue
+                row_ts = (row[6] if len(row) > 6 else "").strip()
+                if row_ts == ts:
+                    return comment
+            for row in rows:
+                if not _is_poll_slot_key(row[0] if row else ""):
+                    continue
+                if row[0] != poll_date or row[2] != user_id:
+                    continue
+                comment = (row[5] if len(row) > 5 else "").strip()
+                if not comment:
+                    continue
+                row_ts = (row[6] if len(row) > 6 else "").strip()
+                if not row_ts:
+                    return comment
+            return None
+
         for row in rows:
+            if not _is_poll_slot_key(row[0] if row else ""):
+                continue
             if len(row) >= 6 and row[0] == poll_date and row[2] == user_id:
                 comment = (row[5] or "").strip()
                 if comment:
@@ -276,6 +405,8 @@ def get_counts_from_raw_votes(poll_date: str) -> dict:
         service = _get_service()
         rows = _read_raw_votes_rows(service)
         for row in rows:
+            if not _is_poll_slot_key(row[0] if row else ""):
+                continue
             if len(row) < 5 or row[0] != poll_date:
                 continue
             vote = row[4]
@@ -299,7 +430,9 @@ def _aggregate_comments_for_date(service, poll_date: str) -> str:
     lines: list[str] = []
 
     for row in rows:
-        if not row or row[0] != poll_date:
+        if not row or not _is_poll_slot_key(row[0]):
+            continue
+        if row[0] != poll_date:
             continue
         vote = row[4] if len(row) > 4 else ""
         remark = (row[5] if len(row) > 5 else "").strip()
@@ -311,32 +444,80 @@ def _aggregate_comments_for_date(service, poll_date: str) -> str:
     return "\n".join(lines)
 
 
+def _reorganize_daily_summary(service) -> None:
+    """
+    Sort summary rows by poll slot, group by calendar day with a banner row and blank line.
+    Preserves header row 1; overwrites A2:H onward.
+    """
+    sheet = service.spreadsheets()
+    result = (
+        sheet.values()
+        .get(spreadsheetId=SPREADSHEET_ID, range=f"{SUMMARY_SHEET}!A2:H")
+        .execute()
+    )
+    rows = result.get("values", [])
+    data: list[list[str]] = []
+    for r in rows:
+        if r and _is_poll_slot_key(r[0]):
+            data.append((r + [""] * 8)[:8])
+
+    data.sort(key=lambda x: x[0])
+
+    out: list[list[str]] = []
+    prev_day: str | None = None
+    for r in data:
+        day = _date_part_from_slot(r[0])
+        if day != prev_day:
+            if out:
+                out.append([""] * 8)
+            out.append([f"{_SECTION_DAY_PREFIX}{day}", "", "", "", "", "", "", ""])
+            prev_day = day
+        out.append(r)
+
+    sheet.values().clear(
+        spreadsheetId=SPREADSHEET_ID,
+        range=f"{SUMMARY_SHEET}!A2:H5000",
+    ).execute()
+    if out:
+        sheet.values().update(
+            spreadsheetId=SPREADSHEET_ID,
+            range=f"{SUMMARY_SHEET}!A2",
+            valueInputOption="RAW",
+            body={"values": out},
+        ).execute()
+
+
 def append_vote(
     poll_date: str,
     user_id: str,
     user_name: str,
     choice: str,
     remark: str = "",
+    message_ts: str = "",
 ):
     """
     Appends one row to the Raw Votes tab immediately after a vote is cast.
     Stores one row in Raw Votes. `choice` may be blank for comment-only submissions.
+    message_ts ties the row to a specific Slack poll message for deduplication.
     """
     try:
         service = _get_service()
         now = datetime.now(ZoneInfo(APP_TIMEZONE)).strftime("%H:%M:%S")
         remark_cell = (remark or "").strip()
+        ts_cell = (message_ts or "").strip()
+
+        existing = _read_raw_votes_rows(service)
+        section_rows = _section_rows_before_vote(poll_date, existing)
+        new_rows = section_rows + [
+            [poll_date, now, user_id, user_name, choice, remark_cell, ts_cell]
+        ]
 
         service.spreadsheets().values().append(
             spreadsheetId=SPREADSHEET_ID,
-            range=f"{RAW_SHEET}!A:F",
+            range=f"{RAW_SHEET}!A:G",
             valueInputOption="RAW",
             insertDataOption="INSERT_ROWS",
-            body={
-                "values": [
-                    [poll_date, now, user_id, user_name, choice, remark_cell]
-                ]
-            },
+            body={"values": new_rows},
         ).execute()
 
         logger.info(f"Appended vote: {user_name} -> {choice} on {poll_date}")
@@ -403,6 +584,13 @@ def update_daily_summary(poll_date: str, counts: dict):
             ).execute()
 
         logger.info(f"Updated daily summary for {poll_date}: {counts}")
+
+        try:
+            _reorganize_daily_summary(service)
+        except HttpError as e:
+            logger.warning(f"Daily summary reorganize HttpError (data still saved): {e}")
+        except Exception as e:
+            logger.warning(f"Daily summary reorganize failed (data still saved): {e}")
 
     except HttpError as e:
         logger.error(f"Google Sheets HttpError updating summary: {e}")

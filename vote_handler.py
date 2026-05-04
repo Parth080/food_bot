@@ -1,7 +1,10 @@
 import json
 import logging
+import time
 from datetime import datetime
 from zoneinfo import ZoneInfo
+
+from slack_sdk.errors import SlackApiError
 
 from poll import build_poll_blocks
 from sheets import (
@@ -37,7 +40,8 @@ def open_comment_modal(body: dict, client, action: dict) -> None:
     user_id = body["user"]["id"]
     poll_slot = _poll_slot_from_action(action) or _current_poll_slot()
     channel_id = body["container"]["channel_id"]
-    previous_comment = get_user_comment_for_date(poll_slot, user_id)
+    message_ts = body["container"]["message_ts"]
+    previous_comment = get_user_comment_for_date(poll_slot, user_id, message_ts)
     if previous_comment:
         client.chat_postEphemeral(
             channel=channel_id,
@@ -130,7 +134,7 @@ def handle_comment_modal_submit(body: dict, client, view: dict) -> None:
             text="Comment was empty, so nothing was saved.",
         )
         return
-    if get_user_comment_for_date(poll_date, user_id):
+    if get_user_comment_for_date(poll_date, user_id, message_ts):
         client.chat_postEphemeral(
             channel=channel_id,
             user=user_id,
@@ -140,7 +144,7 @@ def handle_comment_modal_submit(body: dict, client, view: dict) -> None:
         return
 
     user_name = _get_user_name(client, user_id)
-    append_vote(poll_date, user_id, user_name, choice="", remark=comment)
+    append_vote(poll_date, user_id, user_name, choice="", remark=comment, message_ts=message_ts)
     counts = get_counts_from_raw_votes(poll_date)
     update_daily_summary(poll_date, counts)
     _refresh_poll_message(client, channel_id, message_ts, poll_date, counts)
@@ -168,8 +172,8 @@ def process_vote(
     channel_id = body["container"]["channel_id"]
     message_ts = body["container"]["message_ts"]
 
-    # --- Deduplication ---
-    previous = get_user_vote_for_date(poll_date, user_id)
+    # --- Deduplication (message_ts = stable id for this poll message in Slack) ---
+    previous = get_user_vote_for_date(poll_date, user_id, message_ts)
     if previous:
         client.chat_postEphemeral(
             channel=channel_id,
@@ -183,17 +187,22 @@ def process_vote(
     user_name = _get_user_name(client, user_id)
 
     # --- Write to Google Sheets ---
-    append_vote(poll_date, user_id, user_name, choice, remark="")
+    append_vote(poll_date, user_id, user_name, choice, remark="", message_ts=message_ts)
 
     # --- Recalculate counts from Raw Votes (single source of truth) ---
     counts = get_counts_from_raw_votes(poll_date)
     update_daily_summary(poll_date, counts)
 
     # --- Update the poll message with live count ---
-    _refresh_poll_message(client, channel_id, message_ts, poll_date, counts)
+    refreshed = _refresh_poll_message(client, channel_id, message_ts, poll_date, counts)
 
     # --- Confirm to the voter privately ---
     thanks = f"Got your vote: {_label(choice)} ✅  Thanks {user_name.split()[0]}!"
+    if not refreshed:
+        thanks += (
+            "\n\n_(The channel poll couldn’t be refreshed just now; your vote is saved in the sheet. "
+            "If counts look wrong, check the thread under the poll.)_"
+        )
     client.chat_postEphemeral(
         channel=channel_id,
         user=user_id,
@@ -203,17 +212,62 @@ def process_vote(
     logger.info(f"Vote processed: {user_name} ({user_id}) -> {choice}")
 
 
-def _refresh_poll_message(client, channel_id: str, message_ts: str, poll_date: str, counts: dict):
-    """Updates the original poll message with the latest vote counts."""
+def _refresh_poll_message(
+    client, channel_id: str, message_ts: str, poll_date: str, counts: dict
+) -> bool:
+    """
+    Updates the original poll message with the latest vote counts.
+    Retries on transient Slack errors; falls back to a thread reply if chat.update keeps failing.
+    """
+    blocks = build_poll_blocks(poll_date, counts)
+    text = f"Food poll — {poll_date} | Total {sum(counts.values())}"
+
+    for attempt in range(3):
+        try:
+            client.chat_update(
+                channel=channel_id,
+                ts=message_ts,
+                blocks=blocks,
+                text=text,
+            )
+            return True
+        except SlackApiError as e:
+            err = (e.response or {}).get("error", "") if e.response else ""
+            logger.warning(
+                "chat_update failed (attempt %s): error=%s — %s",
+                attempt + 1,
+                err,
+                e,
+            )
+            if err == "ratelimited":
+                retry_after = 1.0
+                if e.response is not None and getattr(e.response, "headers", None):
+                    ra = e.response.headers.get("Retry-After")
+                    if ra:
+                        try:
+                            retry_after = float(ra)
+                        except ValueError:
+                            pass
+                time.sleep(retry_after)
+            elif attempt < 2:
+                time.sleep(0.6 * (attempt + 1))
+        except Exception as e:
+            logger.warning("chat_update failed (attempt %s): %s", attempt + 1, e)
+            if attempt < 2:
+                time.sleep(0.6 * (attempt + 1))
+
     try:
-        client.chat_update(
+        client.chat_postMessage(
             channel=channel_id,
-            ts=message_ts,
-            blocks=build_poll_blocks(poll_date, counts),
-            text=f"Food poll — {poll_date} | Total {sum(counts.values())}",
+            thread_ts=message_ts,
+            text=text + " _(live counts — posted here because the poll message could not be edited)_",
+            blocks=blocks,
         )
+        logger.info("Posted poll refresh as thread reply after chat_update failures")
+        return True
     except Exception as e:
-        logger.error(f"Failed to update poll message: {e}")
+        logger.error(f"Thread fallback for poll refresh failed: {e}")
+    return False
 
 
 def _get_user_name(client, user_id: str) -> str:

@@ -5,6 +5,7 @@ import logging
 import os
 import re
 import threading
+import time
 import urllib.parse
 from datetime import datetime
 from zoneinfo import ZoneInfo
@@ -506,11 +507,10 @@ def append_vote(
     remark: str = "",
     message_ts: str = "",
     _rows: list | None = None,
-):
+) -> bool:
     """
-    Appends one row to the Raw Votes tab immediately after a vote is cast.
-    Stores one row in Raw Votes. `choice` may be blank for comment-only submissions.
-    message_ts ties the row to a specific Slack poll message for deduplication.
+    Appends one row to the Raw Votes tab. Returns True on success, False on failure.
+    Retries up to 3 times on 429 (rate limit) or 503 (transient) errors.
     """
     try:
         service = _get_service()
@@ -524,20 +524,30 @@ def append_vote(
             [poll_date, now, user_id, user_name, choice, remark_cell, ts_cell]
         ]
 
-        service.spreadsheets().values().append(
+        req = service.spreadsheets().values().append(
             spreadsheetId=SPREADSHEET_ID,
             range=f"{RAW_SHEET}!A:G",
             valueInputOption="RAW",
             insertDataOption="INSERT_ROWS",
             body={"values": new_rows},
-        ).execute()
-
-        logger.info(f"Appended vote: {user_name} -> {choice} on {poll_date}")
+        )
+        for attempt in range(3):
+            try:
+                req.execute()
+                logger.info(f"Appended vote: {user_name} -> {choice} on {poll_date}")
+                return True
+            except HttpError as e:
+                status = int(e.resp.status) if e.resp else 0
+                if status in (429, 503) and attempt < 2:
+                    time.sleep(2 ** attempt)
+                    continue
+                raise
 
     except HttpError as e:
         logger.error(f"Google Sheets HttpError appending vote: {e}")
     except Exception as e:
         logger.error(f"Unexpected error appending vote: {e}")
+    return False
 
 
 def update_daily_summary(poll_date: str, counts: dict, _rows: list | None = None):

@@ -20,7 +20,8 @@ in-channel (not only the sheet).
 Usage:
   python scripts/load_test_votes.py
   python scripts/load_test_votes.py --count 500 --workers 100
-  python scripts/load_test_votes.py --no-post-live-poll --message-ts ... --poll-slot "..."
+  python scripts/load_test_votes.py --no-post-live-poll --message-ts <permalink_ts>
+  (Default poll_slot is 2026-05-05 09:17 IST; override with --poll-slot if needed.)
 
 Warning: Writes to your real sheet and spams Slack + your app.
 """
@@ -47,9 +48,9 @@ from dotenv import load_dotenv
 DEFAULT_BASE_URL = "https://food-bot-flam.onrender.com"
 DEFAULT_SLACK_REQUEST_PATH = "/slack/events"
 DEFAULT_POLL_CHANNEL_ID = "C0ARC31G2HM"
-# From permalink …/p1777886496848499 → ts = 1777886496.848499
-DEFAULT_POLL_MESSAGE_TS = "1777886496.848499"
-DEFAULT_POLL_SLOT = "2026-05-04 14:51"
+# With --no-post-live-poll: set via --message-ts or LOAD_TEST_MESSAGE_TS (Slack permalink → ts).
+DEFAULT_POLL_MESSAGE_TS = ""
+DEFAULT_POLL_SLOT = "2026-05-05 09:17"
 
 
 def _load_dotenv_from_repo() -> Path:
@@ -309,6 +310,11 @@ def main() -> None:
         channel_id, message_ts, poll_slot = _resolve_poll_target(
             args.channel_id, args.message_ts, args.poll_slot
         )
+        if not message_ts.strip():
+            p.error(
+                "With --no-post-live-poll, set --message-ts or LOAD_TEST_MESSAGE_TS "
+                "(open the poll in Slack → Copy link → ts is the number after the last `p` in the path)."
+            )
         print("\n=== Step 1: Skipped live post (reuse message) ===\n")
 
     if args.seed is not None:

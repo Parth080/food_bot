@@ -1,6 +1,7 @@
 import gc
 import json
 import logging
+import threading
 import time
 from datetime import datetime
 from zoneinfo import ZoneInfo
@@ -25,6 +26,9 @@ COMMENT_MODAL_CALLBACK_ID = "comment_modal"
 
 # User names change very rarely — cache forever for the process lifetime.
 _user_name_cache: dict[str, str] = {}
+
+# Serializes the read→dedup→write sequence so concurrent votes don't race on the same sheet rows.
+_vote_write_lock = threading.Lock()
 
 
 def _current_poll_slot() -> str:
@@ -141,9 +145,22 @@ def handle_comment_modal_submit(body: dict, client, view: dict) -> None:
             text="Comment was empty, so nothing was saved.",
         )
         return
-    rows_before = read_raw_votes_rows()
-    if get_user_comment_for_date(poll_date, user_id, message_ts, _rows=rows_before):
-        del rows_before
+    user_name = _get_user_name(client, user_id)
+
+    duplicate = False
+    comment_saved = False
+    with _vote_write_lock:
+        rows_before = read_raw_votes_rows()
+        duplicate = bool(get_user_comment_for_date(poll_date, user_id, message_ts, _rows=rows_before))
+        if not duplicate:
+            comment_saved = append_vote(
+                poll_date, user_id, user_name, choice="", remark=comment,
+                message_ts=message_ts, _rows=rows_before
+            )
+    del rows_before
+    gc.collect()
+
+    if duplicate:
         client.chat_postEphemeral(
             channel=channel_id,
             user=user_id,
@@ -152,10 +169,14 @@ def handle_comment_modal_submit(body: dict, client, view: dict) -> None:
         logger.info(f"Duplicate comment blocked (submit): {user_id} on {poll_date}")
         return
 
-    user_name = _get_user_name(client, user_id)
-    append_vote(poll_date, user_id, user_name, choice="", remark=comment, message_ts=message_ts, _rows=rows_before)
-    del rows_before
-    gc.collect()
+    if not comment_saved:
+        client.chat_postEphemeral(
+            channel=channel_id,
+            user=user_id,
+            text="❌ Could not save your comment right now — please try again in a moment.",
+        )
+        logger.error(f"Comment not saved for {user_id} on {poll_date} (Sheets append failed)")
+        return
 
     rows_after = read_raw_votes_rows()
     counts = get_counts_from_raw_votes(poll_date, _rows=rows_after)
@@ -187,31 +208,45 @@ def process_vote(
     channel_id = body["container"]["channel_id"]
     message_ts = body["container"]["message_ts"]
 
-    # --- Single sheet read: shared by dedup check, section-banner logic, count calculation,
-    #     and comment aggregation. New vote count is added locally — no second read needed. ---
-    rows = read_raw_votes_rows()
-    previous = get_user_vote_for_date(poll_date, user_id, message_ts, _rows=rows)
+    # Fetch name before the lock — cached after first Slack API call per user.
+    user_name = _get_user_name(client, user_id)
+
+    # Serialize read→dedup→write so concurrent requests don't race on the same sheet rows.
+    # Lock is released before any Slack calls (which are slow and don't need exclusion).
+    previous = None
+    vote_saved = False
+    rows = None
+    with _vote_write_lock:
+        rows = read_raw_votes_rows()
+        previous = get_user_vote_for_date(poll_date, user_id, message_ts, _rows=rows)
+        if not previous:
+            vote_saved = append_vote(
+                poll_date, user_id, user_name, choice, remark="", message_ts=message_ts, _rows=rows
+            )
+
     if previous:
-        del rows
         client.chat_postEphemeral(
             channel=channel_id,
             user=user_id,
             text=f"You already voted *{_label(previous)}* for this poll. Votes are final — thanks! 🙏",
         )
         logger.info(f"Duplicate vote blocked: {user_id} already voted {previous}")
+        del rows
         return
 
-    # --- Get user's display name (served from cache after first fetch) ---
-    user_name = _get_user_name(client, user_id)
+    if not vote_saved:
+        client.chat_postEphemeral(
+            channel=channel_id,
+            user=user_id,
+            text="❌ Could not save your vote right now — please try again in a moment.",
+        )
+        logger.error(f"Vote not saved for {user_id} on {poll_date} (Sheets append failed)")
+        del rows
+        return
 
-    # --- Write vote; reuse rows for section-banner logic ---
-    append_vote(poll_date, user_id, user_name, choice, remark="", message_ts=message_ts, _rows=rows)
-
-    # --- Compute counts from the pre-append snapshot + 1 for this vote (avoids a second read) ---
+    # Counts computed from the pre-append snapshot + 1 (avoids a second read).
     counts = get_counts_from_raw_votes(poll_date, _rows=rows)
     counts[choice] = counts.get(choice, 0) + 1
-
-    # --- Update summary; pass rows for comment aggregation (vote has no remark, so rows is accurate) ---
     update_daily_summary(poll_date, counts, _rows=rows)
     del rows
     gc.collect()

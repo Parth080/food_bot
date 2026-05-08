@@ -1,7 +1,5 @@
-import gc
 import json
 import logging
-import threading
 import time
 from datetime import datetime
 from zoneinfo import ZoneInfo
@@ -14,7 +12,6 @@ from sheets import (
     get_counts_from_raw_votes,
     get_user_comment_for_date,
     get_user_vote_for_date,
-    read_raw_votes_rows,
     update_daily_summary,
 )
 from poll_schedule_config import POLL_TIMEZONE
@@ -23,12 +20,6 @@ logger = logging.getLogger(__name__)
 
 # Must match Slack modal callback_id and Bolt @app.view registration
 COMMENT_MODAL_CALLBACK_ID = "comment_modal"
-
-# User names change very rarely — cache forever for the process lifetime.
-_user_name_cache: dict[str, str] = {}
-
-# Serializes the read→dedup→write sequence so concurrent votes don't race on the same sheet rows.
-_vote_write_lock = threading.Lock()
 
 
 def _current_poll_slot() -> str:
@@ -40,7 +31,7 @@ def _poll_slot_from_action(action: dict) -> str | None:
     bid = action.get("block_id") or ""
     prefix = "food_poll_"
     if bid.startswith(prefix):
-        return bid[len(prefix) :]
+        return bid[len(prefix):]
     return None
 
 
@@ -50,9 +41,7 @@ def open_comment_modal(body: dict, client, action: dict) -> None:
     poll_slot = _poll_slot_from_action(action) or _current_poll_slot()
     channel_id = body["container"]["channel_id"]
     message_ts = body["container"]["message_ts"]
-    rows = read_raw_votes_rows()
-    previous_comment = get_user_comment_for_date(poll_slot, user_id, message_ts, _rows=rows)
-    del rows
+    previous_comment = get_user_comment_for_date(poll_slot, user_id, message_ts)
     if previous_comment:
         client.chat_postEphemeral(
             channel=channel_id,
@@ -145,21 +134,10 @@ def handle_comment_modal_submit(body: dict, client, view: dict) -> None:
             text="Comment was empty, so nothing was saved.",
         )
         return
+
     user_name = _get_user_name(client, user_id)
 
-    duplicate = False
-    comment_saved = False
-    with _vote_write_lock:
-        rows_before = read_raw_votes_rows()
-        duplicate = bool(get_user_comment_for_date(poll_date, user_id, message_ts, _rows=rows_before))
-        if not duplicate:
-            comment_saved = append_vote(
-                poll_date, user_id, user_name, choice="", remark=comment,
-                message_ts=message_ts, _rows=rows_before
-            )
-    del rows_before
-    gc.collect()
-
+    duplicate = bool(get_user_comment_for_date(poll_date, user_id, message_ts))
     if duplicate:
         client.chat_postEphemeral(
             channel=channel_id,
@@ -169,20 +147,9 @@ def handle_comment_modal_submit(body: dict, client, view: dict) -> None:
         logger.info(f"Duplicate comment blocked (submit): {user_id} on {poll_date}")
         return
 
-    if not comment_saved:
-        client.chat_postEphemeral(
-            channel=channel_id,
-            user=user_id,
-            text="❌ Could not save your comment right now — please try again in a moment.",
-        )
-        logger.error(f"Comment not saved for {user_id} on {poll_date} (Sheets append failed)")
-        return
-
-    rows_after = read_raw_votes_rows()
-    counts = get_counts_from_raw_votes(poll_date, _rows=rows_after)
-    update_daily_summary(poll_date, counts, _rows=rows_after)
-    del rows_after
-    gc.collect()
+    append_vote(poll_date, user_id, user_name, choice="", remark=comment, message_ts=message_ts)
+    counts = get_counts_from_raw_votes(poll_date)
+    update_daily_summary(poll_date, counts)
     _refresh_poll_message(client, channel_id, message_ts, poll_date, counts)
 
     client.chat_postEphemeral(
@@ -208,22 +175,7 @@ def process_vote(
     channel_id = body["container"]["channel_id"]
     message_ts = body["container"]["message_ts"]
 
-    # Fetch name before the lock — cached after first Slack API call per user.
-    user_name = _get_user_name(client, user_id)
-
-    # Serialize read→dedup→write so concurrent requests don't race on the same sheet rows.
-    # Lock is released before any Slack calls (which are slow and don't need exclusion).
-    previous = None
-    vote_saved = False
-    rows = None
-    with _vote_write_lock:
-        rows = read_raw_votes_rows()
-        previous = get_user_vote_for_date(poll_date, user_id, message_ts, _rows=rows)
-        if not previous:
-            vote_saved = append_vote(
-                poll_date, user_id, user_name, choice, remark="", message_ts=message_ts, _rows=rows
-            )
-
+    previous = get_user_vote_for_date(poll_date, user_id, message_ts)
     if previous:
         client.chat_postEphemeral(
             channel=channel_id,
@@ -231,34 +183,19 @@ def process_vote(
             text=f"You already voted *{_label(previous)}* for this poll. Votes are final — thanks! 🙏",
         )
         logger.info(f"Duplicate vote blocked: {user_id} already voted {previous}")
-        del rows
         return
 
-    if not vote_saved:
-        client.chat_postEphemeral(
-            channel=channel_id,
-            user=user_id,
-            text="❌ Could not save your vote right now — please try again in a moment.",
-        )
-        logger.error(f"Vote not saved for {user_id} on {poll_date} (Sheets append failed)")
-        del rows
-        return
+    user_name = _get_user_name(client, user_id)
+    append_vote(poll_date, user_id, user_name, choice, remark="", message_ts=message_ts)
+    counts = get_counts_from_raw_votes(poll_date)
+    update_daily_summary(poll_date, counts)
 
-    # Counts computed from the pre-append snapshot + 1 (avoids a second read).
-    counts = get_counts_from_raw_votes(poll_date, _rows=rows)
-    counts[choice] = counts.get(choice, 0) + 1
-    update_daily_summary(poll_date, counts, _rows=rows)
-    del rows
-    gc.collect()
-
-    # --- Update the poll message with live count ---
     refreshed = _refresh_poll_message(client, channel_id, message_ts, poll_date, counts)
 
-    # --- Confirm to the voter privately ---
     thanks = f"Got your vote: {_label(choice)} ✅  Thanks {user_name.split()[0]}!"
     if not refreshed:
         thanks += (
-            "\n\n_(The channel poll couldn’t be refreshed just now; your vote is saved in the sheet. "
+            "\n\n_(The channel poll couldn't be refreshed just now; your vote is saved in the sheet. "
             "If counts look wrong, check the thread under the poll.)_"
         )
     client.chat_postEphemeral(
@@ -329,19 +266,14 @@ def _refresh_poll_message(
 
 
 def _get_user_name(client, user_id: str) -> str:
-    """Returns the user's real name, cached in-process to avoid repeated Slack API calls."""
-    cached = _user_name_cache.get(user_id)
-    if cached:
-        return cached
+    """Returns the user's real name."""
     try:
         result = client.users_info(user=user_id)
         profile = result["user"]["profile"]
-        name = profile.get("real_name") or profile.get("display_name") or user_id
+        return profile.get("real_name") or profile.get("display_name") or user_id
     except Exception as e:
         logger.warning(f"Could not fetch user name for {user_id}: {e}")
-        name = user_id
-    _user_name_cache[user_id] = name
-    return name
+        return user_id
 
 
 def _label(choice: str) -> str:

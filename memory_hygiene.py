@@ -47,7 +47,7 @@ def start_memory_hygiene() -> None:
         logger.info("Memory hygiene disabled (MEMORY_HYGIENE_ENABLED=%s)", enabled)
         return
 
-    interval_seconds = _read_positive_int("MEMORY_CLEANUP_INTERVAL_SECONDS", 60)
+    interval_seconds = _read_positive_int("MEMORY_CLEANUP_INTERVAL_SECONDS", 900)
     use_malloc_trim = (
         (os.environ.get("MEMORY_USE_MALLOC_TRIM") or "1").strip().lower()
         not in {"0", "false", "no"}

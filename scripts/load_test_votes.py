@@ -45,7 +45,7 @@ from pathlib import Path
 from dotenv import load_dotenv
 
 # ── Hardcoded targets (override via .env or CLI when you run a new poll) ─────────
-DEFAULT_BASE_URL = "https://food-bot-flam.onrender.com"
+DEFAULT_BASE_URL = "https://ai-team-core--janta-poll-bot-web.modal.run"
 DEFAULT_SLACK_REQUEST_PATH = "/slack/events"
 DEFAULT_POLL_CHANNEL_ID = "C0ARC31G2HM"
 # With --no-post-live-poll: set via --message-ts or LOAD_TEST_MESSAGE_TS (Slack permalink → ts).

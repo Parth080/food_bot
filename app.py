@@ -1,3 +1,4 @@
+import atexit
 import json
 import logging
 import os
@@ -21,19 +22,16 @@ from vote_handler import (
     process_vote,
 )
 from sheets import ensure_sheet_headers
-from poll_scheduler import start_scheduled_polls
 from poll_schedule_config import POLL_TIMEZONE
-from memory_hygiene import start_memory_hygiene
+from vote_buffer import get_buffer
 
-# ── Logging ──────────────────────────────────────────────────────────────────
 logging.basicConfig(
-    level=logging.INFO,
+    level=os.environ.get("LOG_LEVEL", "INFO").upper(),
     format="%(asctime)s [%(levelname)s] %(name)s — %(message)s",
 )
 logger = logging.getLogger(__name__)
-start_memory_hygiene()
 
-# If set, poll is posted here; if empty, posts in the channel where /startpoll was run.
+# If set, scheduled polls go here. If empty, /startpoll falls back to its caller's channel.
 CONFIGURED_POLL_CHANNEL_ID = (os.environ.get("SLACK_CHANNEL_ID") or "").strip()
 
 
@@ -88,8 +86,14 @@ def _build_poll_slot(slot_time: str | None = None) -> str:
     return now.strftime("%Y-%m-%d %H:%M")
 
 
-def _post_scheduled_poll(slot_time: str | None = None) -> None:
-    """Cron callback: post today's poll to SLACK_CHANNEL_ID."""
+def post_scheduled_poll(slot_time: str | None = None) -> None:
+    """Modal cron callback: post today's poll to SLACK_CHANNEL_ID.
+
+    Called from `modal_app.py` by a `modal.Cron(...)` function. Pure-stateless —
+    talks to Slack only, does not touch the vote buffer (which lives in the
+    web container's process).
+    """
+    init_runtime()  # Sheet headers + buffer; cron containers also need this.
     channel = CONFIGURED_POLL_CHANNEL_ID
     if not channel:
         logger.error("Scheduled poll skipped: SLACK_CHANNEL_ID not set.")
@@ -97,12 +101,9 @@ def _post_scheduled_poll(slot_time: str | None = None) -> None:
     poll_slot = _build_poll_slot(slot_time)
     try:
         _post_food_poll_message(bolt_app.client, channel, poll_slot)
-        logger.info(f"Scheduled poll posted for {poll_slot} → {channel}")
+        logger.info("Scheduled poll posted for %s → %s", poll_slot, channel)
     except Exception as e:
-        logger.error(f"Scheduled poll failed: {e}")
-
-
-start_scheduled_polls(_post_scheduled_poll, CONFIGURED_POLL_CHANNEL_ID)
+        logger.error("Scheduled poll failed: %s", e)
 
 
 # ── Slash Command: /startpoll ─────────────────────────────────────────────────
@@ -193,10 +194,6 @@ def on_comment_modal_submit(ack, body, client, view):
 flask_app = Flask(__name__)
 handler = SlackRequestHandler(bolt_app)
 
-# Gunicorn on Render never runs `if __name__ == "__main__"` — ensure sheet row 1 headers exist.
-logger.info("Ensuring Google Sheet column headers…")
-ensure_sheet_headers()
-
 
 @flask_app.route("/slack/events", methods=["POST"])
 def slack_events():
@@ -210,7 +207,7 @@ def slack_commands():
 
 @flask_app.route("/", methods=["POST"])
 def slack_root_post():
-    """Slack Request URL often set to https://<host>/ — same Bolt handler as /slack/events."""
+    """Slack Request URL is often set to https://<host>/ — same Bolt handler."""
     return handler.handle(request)
 
 
@@ -224,8 +221,31 @@ def root():
     return jsonify({"status": "ok", "message": "Janta Poll Bot is running"}), 200
 
 
-# ── Startup ───────────────────────────────────────────────────────────────────
+# ── Runtime init ──────────────────────────────────────────────────────────────
+_runtime_lock = __import__("threading").Lock()
+_runtime_initialized = False
+
+
+def init_runtime() -> None:
+    """Idempotent runtime setup: sheet headers + vote buffer.
+
+    Called by the Modal web entrypoint (`modal_app.web`) and by the cron
+    entrypoint before each poll is posted. Safe to call many times.
+    """
+    global _runtime_initialized
+    with _runtime_lock:
+        if _runtime_initialized:
+            return
+        logger.info("Initialising Janta Poll Bot runtime…")
+        ensure_sheet_headers()
+        buffer = get_buffer()
+        buffer.start()
+        atexit.register(buffer.shutdown)
+        _runtime_initialized = True
+
+
+# ── Local dev entrypoint ──────────────────────────────────────────────────────
 if __name__ == "__main__":
-    logger.info("Starting Janta Poll Bot...")
-    ensure_sheet_headers()
+    logger.info("Starting Janta Poll Bot (local dev)…")
+    init_runtime()
     flask_app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 3000)))

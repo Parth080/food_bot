@@ -5,8 +5,6 @@ import logging
 import os
 import re
 import urllib.parse
-from datetime import datetime
-from zoneinfo import ZoneInfo
 from google.oauth2 import service_account
 from googleapiclient.discovery import build
 from googleapiclient.errors import HttpError
@@ -15,7 +13,6 @@ logger = logging.getLogger(__name__)
 
 SCOPES = ["https://www.googleapis.com/auth/spreadsheets"]
 SPREADSHEET_ID = os.environ.get("GOOGLE_SHEET_ID")
-APP_TIMEZONE = os.environ.get("APP_TIMEZONE", "Asia/Kolkata")
 
 # Sheet tab names
 RAW_SHEET = "Raw Votes"
@@ -301,123 +298,18 @@ def _read_raw_votes_rows(service) -> list[list[str]]:
     return result.get("values", [])
 
 
-def get_user_vote_for_date(
-    poll_date: str, user_id: str, message_ts: str | None = None
-) -> str | None:
+def read_raw_votes_rows_for_slot(service, slot: str) -> list[list[str]]:
+    """Returns Raw Votes rows whose poll-slot column matches `slot` (no section rows).
+
+    Used by VoteBuffer to hydrate its in-memory state on first access of a slot
+    after a container restart.
     """
-    Returns existing rating (1..5) for this user on this poll.
-
-    When message_ts is set (Slack parent message ts), that is the primary dedupe key so
-    a second click cannot slip through if poll_slot parsing ever differs. Legacy rows
-    without Message TS still match on poll_slot + user.
-    """
-    try:
-        service = _get_service()
-        rows = _read_raw_votes_rows(service)
-        ts = (message_ts or "").strip()
-
-        if ts:
-            for row in rows:
-                if len(row) < 5 or row[2] != user_id or row[4] not in _RATINGS:
-                    continue
-                row_ts = (row[6] if len(row) > 6 else "").strip()
-                if row_ts == ts:
-                    return row[4]
-            for row in rows:
-                if not _is_poll_slot_key(row[0] if row else ""):
-                    continue
-                if len(row) < 5 or row[0] != poll_date or row[2] != user_id:
-                    continue
-                if row[4] not in _RATINGS:
-                    continue
-                row_ts = (row[6] if len(row) > 6 else "").strip()
-                if not row_ts:
-                    return row[4]
-            return None
-
-        for row in rows:
-            if not _is_poll_slot_key(row[0] if row else ""):
-                continue
-            if len(row) >= 5 and row[0] == poll_date and row[2] == user_id and row[4] in _RATINGS:
-                return row[4]
-        return None
-    except HttpError as e:
-        logger.error(f"Google Sheets HttpError checking duplicate vote: {e}")
-        return None
-    except Exception as e:
-        logger.error(f"Unexpected error checking duplicate vote: {e}")
-        return None
-
-
-def get_user_comment_for_date(
-    poll_date: str, user_id: str, message_ts: str | None = None
-) -> str | None:
-    """Returns existing non-empty comment for user on this poll (same rules as vote dedupe)."""
-    try:
-        service = _get_service()
-        rows = _read_raw_votes_rows(service)
-        ts = (message_ts or "").strip()
-
-        if ts:
-            for row in rows:
-                if len(row) < 6 or row[2] != user_id:
-                    continue
-                comment = (row[5] or "").strip()
-                if not comment:
-                    continue
-                row_ts = (row[6] if len(row) > 6 else "").strip()
-                if row_ts == ts:
-                    return comment
-            for row in rows:
-                if not _is_poll_slot_key(row[0] if row else ""):
-                    continue
-                if row[0] != poll_date or row[2] != user_id:
-                    continue
-                comment = (row[5] if len(row) > 5 else "").strip()
-                if not comment:
-                    continue
-                row_ts = (row[6] if len(row) > 6 else "").strip()
-                if not row_ts:
-                    return comment
-            return None
-
-        for row in rows:
-            if not _is_poll_slot_key(row[0] if row else ""):
-                continue
-            if len(row) >= 6 and row[0] == poll_date and row[2] == user_id:
-                comment = (row[5] or "").strip()
-                if comment:
-                    return comment
-        return None
-    except HttpError as e:
-        logger.error(f"Google Sheets HttpError checking duplicate comment: {e}")
-        return None
-    except Exception as e:
-        logger.error(f"Unexpected error checking duplicate comment: {e}")
-        return None
-
-
-def get_counts_from_raw_votes(poll_date: str) -> dict:
-    """Computes rating 1..5 counts for poll_date from Raw Votes rows."""
-    counts = {"1": 0, "2": 0, "3": 0, "4": 0, "5": 0}
-    try:
-        service = _get_service()
-        rows = _read_raw_votes_rows(service)
-        for row in rows:
-            if not _is_poll_slot_key(row[0] if row else ""):
-                continue
-            if len(row) < 5 or row[0] != poll_date:
-                continue
-            vote = row[4]
-            if vote in counts:
-                counts[vote] += 1
-        return counts
-    except HttpError as e:
-        logger.error(f"Google Sheets HttpError reading counts: {e}")
-        return counts
-    except Exception as e:
-        logger.error(f"Unexpected error reading counts: {e}")
-        return counts
+    rows = _read_raw_votes_rows(service)
+    return [
+        r
+        for r in rows
+        if r and _is_poll_slot_key(r[0]) and r[0] == slot
+    ]
 
 
 def _aggregate_comments_for_date(service, poll_date: str) -> str:
@@ -485,39 +377,54 @@ def _reorganize_daily_summary(service) -> None:
         ).execute()
 
 
-def append_vote(
-    poll_date: str,
-    user_id: str,
-    user_name: str,
-    choice: str,
-    remark: str = "",
-    message_ts: str = "",
-):
-    """Appends one row to the Raw Votes tab."""
+def bulk_append_votes(rows: list[list[str]]) -> None:
+    """Bulk append many vote rows in a single Sheets API call.
+
+    rows: list of 7-column raw rows
+        [poll_slot, submitted_at, user_id, user_name, choice, comment, message_ts]
+
+    Section banners (new-day / new-slot) are inserted as needed before the
+    appropriate row. The full state is read once, then we simulate appending
+    each row to derive the correct banner sequence locally before issuing one
+    `values.append` call.
+    """
+    if not rows:
+        return
     try:
         service = _get_service()
-        now = datetime.now(ZoneInfo(APP_TIMEZONE)).strftime("%H:%M:%S")
-        remark_cell = (remark or "").strip()
-        ts_cell = (message_ts or "").strip()
-
         existing = _read_raw_votes_rows(service)
-        section_rows = _section_rows_before_vote(poll_date, existing)
-        new_rows = section_rows + [
-            [poll_date, now, user_id, user_name, choice, remark_cell, ts_cell]
-        ]
+        out: list[list[str]] = []
+        for row in rows:
+            slot = (row[0] or "").strip() if row else ""
+            if not slot:
+                continue
+            banners = _section_rows_before_vote(slot, existing + out)
+            out.extend(banners)
+            # Pad / trim to 7 columns to keep range consistent.
+            padded = (row + ["", "", "", "", "", "", ""])[:7]
+            out.append(padded)
+
+        if not out:
+            return
 
         service.spreadsheets().values().append(
             spreadsheetId=SPREADSHEET_ID,
             range=f"{RAW_SHEET}!A:G",
             valueInputOption="RAW",
             insertDataOption="INSERT_ROWS",
-            body={"values": new_rows},
+            body={"values": out},
         ).execute()
-        logger.info(f"Appended vote: {user_name} -> {choice} on {poll_date}")
+        logger.info(
+            "Bulk appended %d vote rows (%d total rows incl. banners)",
+            len(rows),
+            len(out),
+        )
     except HttpError as e:
-        logger.error(f"Google Sheets HttpError appending vote: {e}")
+        logger.error(f"Google Sheets HttpError in bulk_append_votes: {e}")
+        raise
     except Exception as e:
-        logger.error(f"Unexpected error appending vote: {e}")
+        logger.error(f"Unexpected error in bulk_append_votes: {e}")
+        raise
 
 
 def update_daily_summary(poll_date: str, counts: dict):
